@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>A.H.S - Rondas com QR Code</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background: #0a0f1e; }
+  input, select, button { font-family: inherit; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="error-box" style="display:none; background:#7f1d1d; color:#fff; padding:16px; font-family:monospace; font-size:13px; white-space:pre-wrap; word-break:break-word;"></div>
+<script>
+  function showErr(msg) {
+    var box = document.getElementById('error-box');
+    box.style.display = 'block';
+    box.textContent += msg + '\n\n---\n\n';
+  }
+  window.onerror = function(msg, src, line, col, err) {
+    showErr('ERRO: ' + msg + '\n(arquivo: ' + src + ', linha ' + line + ', coluna ' + col + ')' + (err && err.stack ? '\n' + err.stack : ''));
+  };
+  window.addEventListener('unhandledrejection', function(e) {
+    showErr('PROMESSA REJEITADA: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
+  });
+</script>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.14.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore-compat.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+// ═══════════════════════════════════════════════════════════
+// FIREBASE
+// ═══════════════════════════════════════════════════════════
+const firebaseConfig = {
+  apiKey: "AIzaSyCEFiNlXvv_uM-DZfT33tIi5_aK4-JCt3c",
+  authDomain: "ronda-8cb86.firebaseapp.com",
+  projectId: "ronda-8cb86",
+  storageBucket: "ronda-8cb86.firebasestorage.app",
+  messagingSenderId: "683075797205",
+  appId: "1:683075797205:web:60b3cbdfbf1ae82576e25c",
+  measurementId: "G-8X8LGSPFQE"
+};
+firebase.initializeApp(firebaseConfig);
+const fdb = firebase.firestore();
+
+function useCollection(name) {
+  const [data, setData] = useState([]);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const unsub = fdb.collection(name).onSnapshot(snap => {
+      setData(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setReady(true);
+    }, err => { console.error("Firestore (" + name + "):", err); setReady(true); });
+    return unsub;
+  }, []);
+  return [data, ready];
+}
+const setItem = (name, id, data) => fdb.collection(name).doc(id).set(data);
+const updateItem = (name, id, data) => fdb.collection(name).doc(id).update(data);
+const removeItem = (name, id) => fdb.collection(name).doc(id).delete();
+
+// ═══════════════════════════════════════════════════════════
+// UTILITIES
+// ═══════════════════════════════════════════════════════════
+const genId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+const fmt = {
+  time: (d) => new Date(d).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }),
+  date: (d) => new Date(d).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit" }),
+  dt: (d) => fmt.date(d) + " " + fmt.time(d),
+  dur: (s, e) => { if (!e) return "—"; const m = Math.floor((new Date(e) - new Date(s)) / 60000); return m < 60 ? m + " min" : Math.floor(m / 60) + "h " + (m % 60) + "min"; }
+};
+const ST = {
+  completed: { label: "Concluída", c: "#00d68f", bg: "rgba(0,214,143,0.12)" },
+  in_progress: { label: "Em andamento", c: "#ffb300", bg: "rgba(255,179,0,0.12)" },
+  incomplete: { label: "Incompleta", c: "#ff3d71", bg: "rgba(255,61,113,0.12)" }
+};
+
+// ═══════════════════════════════════════════════════════════
+// ICONS (SVG embutidos, sem dependência externa)
+// ═══════════════════════════════════════════════════════════
+function Icon({ name, size = 18, color = "currentColor", style = {} }) {
+  const s = { width: size, height: size, flexShrink: 0, ...style };
+  const c = { fill: "none", stroke: color, strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" };
+  switch (name) {
+    case "shield": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M12 2 L20 6 V11 C20 17 16.5 20.5 12 22 C7.5 20.5 4 17 4 11 V6 Z" /></svg>;
+    case "qrcode": return <svg viewBox="0 0 24 24" style={s}><rect x="3" y="3" width="7" height="7" fill={color}/><rect x="14" y="3" width="7" height="7" fill={color}/><rect x="3" y="14" width="7" height="7" fill={color}/><rect x="14" y="14" width="3" height="3" fill={color}/><rect x="18" y="14" width="3" height="3" fill={color}/><rect x="14" y="18" width="3" height="3" fill={color}/><rect x="18" y="18" width="3" height="3" fill={color}/></svg>;
+    case "users": return <svg viewBox="0 0 24 24" style={s} {...c}><circle cx="9" cy="7" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="8" r="2.6"/><path d="M15.5 14.3c2.6.4 4.5 2.6 4.5 5.7"/></svg>;
+    case "mappin": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M12 22s7-7.2 7-12.5A7 7 0 0 0 5 9.5C5 14.8 12 22 12 22Z"/><circle cx="12" cy="9.5" r="2.3"/></svg>;
+    case "logout": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>;
+    case "plus": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M12 5v14M5 12h14"/></svg>;
+    case "check": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M5 13l4 4L19 7"/></svg>;
+    case "x": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M6 6l12 12M18 6L6 18"/></svg>;
+    case "camera": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z"/><circle cx="12" cy="13" r="3.3"/></svg>;
+    case "barchart": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M5 20V11M12 20V4M19 20v-7"/></svg>;
+    case "eye": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="2.8"/></svg>;
+    case "eyeoff": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M2 12s4-7 10-7c2 0 3.7.6 5.1 1.4M22 12s-1.5 2.6-4 4.4M9.9 9.9a2.8 2.8 0 0 0 3.9 3.9"/><path d="M3 3l18 18"/></svg>;
+    case "trash": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14"/></svg>;
+    case "edit": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M4 20h4l11-11-4-4L4 16Z"/></svg>;
+    case "chevronright": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M9 5l7 7-7 7"/></svg>;
+    case "alert": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M12 3 2 21h20Z"/><path d="M12 10v4M12 17.5h.01"/></svg>;
+    case "home": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M4 11.5 12 4l8 7.5"/><path d="M6 10v10h12V10"/></svg>;
+    case "filetext": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M9 12h6M9 16h6"/></svg>;
+    case "arrowleft": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M19 12H5M12 5l-7 7 7 7"/></svg>;
+    case "refresh": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M4 10a8 8 0 0 1 14-4.6M20 14a8 8 0 0 1-14 4.6"/><path d="M18 3v4h-4M6 21v-4h4"/></svg>;
+    case "alignleft": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M3 6h18M3 12h12M3 18h15"/></svg>;
+    case "clock": return <svg viewBox="0 0 24 24" style={s} {...c}><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>;
+    case "printer": return <svg viewBox="0 0 24 24" style={s} {...c}><path d="M6 9V3h12v6M6 18H4a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1h16a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2"/><rect x="6" y="14" width="12" height="7"/></svg>;
+    case "checkcircle": return <svg viewBox="0 0 24 24" style={s} {...c}><circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/></svg>;
+    default: return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// DESIGN TOKENS
+// ═══════════════════════════════════════════════════════════
+const C = { bg: "#0a0f1e", card: "#111827", border: "#1e293b", blue: "#1e6fff", muted: "#64748b" };
+const Card = ({ children, style = {} }) => <div style={{ background: C.card, borderRadius: 16, border: "1px solid " + C.border, ...style }}>{children}</div>;
+const Btn = ({ children, onClick, color = C.blue, style = {}, disabled = false }) => (
+  <button onClick={onClick} disabled={disabled} style={{ background: disabled ? "#1e293b" : color, color: disabled ? "#475569" : "#fff", border: "none", borderRadius: 12, padding: "12px 20px", fontWeight: 700, fontSize: 14, cursor: disabled ? "not-allowed" : "pointer", ...style }}>{children}</button>
+);
+
+function QRImage({ data, size = 180 }) {
+  const [status, setStatus] = useState("loading");
+  const [attempt, setAttempt] = useState(0);
+  const url = "https://api.qrserver.com/v1/create-qr-code/?size=" + size + "x" + size + "&data=" + encodeURIComponent(data) + "&_r=" + attempt;
+  if (status === "error") return (
+    <div style={{ width: size, height: size, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: "#fff", borderRadius: 8 }}>
+      <Icon name="alert" size={22} color="#dc2626" />
+      <div style={{ color: "#dc2626", fontSize: 11, textAlign: "center", padding: "0 8px" }}>Sem internet para gerar o QR Code</div>
+      <button onClick={() => { setStatus("loading"); setAttempt(a => a + 1); }} style={{ background: "#1e6fff", color: "#fff", border: "none", borderRadius: 8, padding: "4px 10px", fontSize: 11, cursor: "pointer" }}>Tentar novamente</button>
+    </div>
+  );
+  return <img src={url} alt="QR" width={size} height={size} style={{ width: size, height: size, display: status === "loading" ? "none" : "block" }} onLoad={() => setStatus("ok")} onError={() => setStatus("error")} />;
+}
+
+// ═══════════════════════════════════════════════════════════
+// ROOT
+// ═══════════════════════════════════════════════════════════
+function App() {
+  const [user, setUser] = useState(null);
+  const [users, usersReady] = useCollection("users");
+  const [points] = useCollection("points");
+  const [routes] = useCollection("routes");
+  const [records] = useCollection("records");
+
+  useEffect(() => {
+    if (usersReady && users.length === 0) {
+      setItem("users", "admin-seed", { name: "Administrador", username: "admin", password: "admin123", role: "admin", active: true, createdAt: new Date().toISOString() }).catch(() => {});
+    }
+  }, [usersReady, users.length]);
+
+  if (!usersReady) return (
+    <div style={{ minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ textAlign: "center" }}>
+        <div style={{ width: 72, height: 72, borderRadius: "50%", background: "linear-gradient(135deg,#1e6fff,#00b4ff)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px", boxShadow: "0 0 40px rgba(30,111,255,0.5)" }}>
+          <Icon name="shield" size={36} color="#fff" />
+        </div>
+        <div style={{ color: "#fff", fontWeight: 900, fontSize: 24, letterSpacing: 8 }}>A.H.S</div>
+        <div style={{ color: "#1e6fff", fontSize: 10, letterSpacing: 4, marginTop: 4 }}>CONECTANDO...</div>
+      </div>
+    </div>
+  );
+
+  if (!user) return <Login users={users} onLogin={setUser} />;
+  if (user.role === "admin") return <Admin currentUser={user} users={users} points={points} routes={routes} records={records} onLogout={() => setUser(null)} />;
+  return <Patrol currentUser={user} routes={routes} points={points} records={records} onLogout={() => setUser(null)} />;
+}
+
+// ═══════════════════════════════════════════════════════════
+// LOGIN
+// ═══════════════════════════════════════════════════════════
+function Login({ users, onLogin }) {
+  const [un, setUn] = useState("");
+  const [pw, setPw] = useState("");
+  const [show, setShow] = useState(false);
+  const [err, setErr] = useState("");
+  const login = () => {
+    const u = users.find(x => x.username === un.trim() && x.password === pw && x.active);
+    if (u) onLogin(u); else setErr("Usuário ou senha incorretos");
+  };
+  return (
+    <div style={{ minHeight: "100vh", background: "radial-gradient(ellipse at 60% 0%, #0d1f4a 0%, #0a0f1e 70%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      <div style={{ marginBottom: 40, textAlign: "center" }}>
+        <div style={{ width: 88, height: 88, borderRadius: "50%", background: "linear-gradient(135deg,#1e6fff,#00b4ff)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", boxShadow: "0 0 60px rgba(30,111,255,0.4)" }}>
+          <Icon name="shield" size={44} color="#fff" />
+        </div>
+        <div style={{ color: "#fff", fontWeight: 900, fontSize: 32, letterSpacing: 10 }}>A.H.S</div>
+        <div style={{ color: "#1e6fff", fontSize: 11, letterSpacing: 5, marginTop: 6 }}>RONDAS COM QR CODE</div>
+      </div>
+      <div style={{ width: "100%", maxWidth: 360 }}>
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ color: C.muted, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 }}>Usuário</div>
+          <input value={un} onChange={e => { setUn(e.target.value); setErr(""); }} onKeyDown={e => e.key === "Enter" && login()} placeholder="Seu usuário"
+            style={{ width: "100%", background: C.card, border: "1px solid " + C.border, borderRadius: 12, padding: "14px 16px", color: "#fff", fontSize: 15, outline: "none", boxSizing: "border-box" }} />
+        </div>
+        <div style={{ marginBottom: 24, position: "relative" }}>
+          <div style={{ color: C.muted, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 }}>Senha</div>
+          <input type={show ? "text" : "password"} value={pw} onChange={e => { setPw(e.target.value); setErr(""); }} onKeyDown={e => e.key === "Enter" && login()} placeholder="Sua senha"
+            style={{ width: "100%", background: C.card, border: "1px solid " + C.border, borderRadius: 12, padding: "14px 48px 14px 16px", color: "#fff", fontSize: 15, outline: "none", boxSizing: "border-box" }} />
+          <button onClick={() => setShow(v => !v)} style={{ position: "absolute", right: 14, top: 38, background: "none", border: "none", cursor: "pointer", color: C.muted }}>
+            <Icon name={show ? "eyeoff" : "eye"} size={18} />
+          </button>
+        </div>
+        {err && <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#ff3d71", fontSize: 13, marginBottom: 16 }}><Icon name="alert" size={15} />{err}</div>}
+        <button onClick={login} style={{ width: "100%", background: "linear-gradient(135deg,#1e6fff,#00b4ff)", border: "none", borderRadius: 14, padding: 16, color: "#fff", fontWeight: 900, fontSize: 16, cursor: "pointer", boxShadow: "0 4px 24px rgba(30,111,255,0.4)" }}>ENTRAR</button>
+      </div>
+      <div style={{ color: "#1e293b", fontSize: 11, marginTop: 48 }}>A.H.S Security System • v2.0</div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// ADMIN
+// ═══════════════════════════════════════════════════════════
+function Admin({ currentUser, users, points, routes, records, onLogout }) {
+  const [tab, setTab] = useState("dash");
+  const tabs = [
+    { id: "dash", icon: "barchart", label: "Painel" },
+    { id: "users", icon: "users", label: "Usuários" },
+    { id: "points", icon: "mappin", label: "Pontos" },
+    { id: "routes", icon: "qrcode", label: "Rondas" },
+    { id: "reports", icon: "filetext", label: "Relatórios" },
+  ];
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column" }}>
+      <Header title="Painel Administrativo" sub={currentUser.name} onLogout={onLogout} />
+      <div style={{ flex: 1, overflowY: "auto", paddingBottom: 8 }}>
+        {tab === "dash" && <ADash records={records} users={users} />}
+        {tab === "users" && <AUsers users={users} />}
+        {tab === "points" && <APoints points={points} />}
+        {tab === "routes" && <ARoutes routes={routes} points={points} />}
+        {tab === "reports" && <AReports records={records} />}
+      </div>
+      <BottomNav tabs={tabs} active={tab} onChange={setTab} />
+    </div>
+  );
+}
+
+function Header({ title, sub, onLogout }) {
+  return (
+    <div style={{ background: C.card, borderBottom: "1px solid " + C.border, padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ width: 34, height: 34, borderRadius: 8, background: "linear-gradient(135deg,#1e6fff,#00b4ff)", display: "flex", alignItems: "center", justifyContent: "center" }}><Icon name="shield" size={17} color="#fff" /></div>
+        <div><div style={{ color: "#fff", fontWeight: 800, fontSize: 13, letterSpacing: 1 }}>A.H.S</div><div style={{ color: "#1e6fff", fontSize: 10, letterSpacing: 1 }}>{title}</div></div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <span style={{ color: C.muted, fontSize: 12 }}>{sub}</span>
+        <button onClick={onLogout} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted }}><Icon name="logout" size={18} /></button>
+      </div>
+    </div>
+  );
+}
+
+function BottomNav({ tabs, active, onChange }) {
+  return (
+    <div style={{ background: C.card, borderTop: "1px solid " + C.border, display: "flex", flexShrink: 0 }}>
+      {tabs.map(t => (
+        <button key={t.id} onClick={() => onChange(t.id)} style={{ flex: 1, padding: "10px 0", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, background: "none", border: "none", cursor: "pointer", color: active === t.id ? "#1e6fff" : C.muted }}>
+          <Icon name={t.icon} size={20} /><span style={{ fontSize: 10 }}>{t.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function ADash({ records, users }) {
+  const today = new Date().toISOString().split("T")[0];
+  const tod = records.filter(r => r.startTime && r.startTime.startsWith(today));
+  const stats = [
+    { l: "Rondas Hoje", v: tod.length, c: "#1e6fff" },
+    { l: "Concluídas", v: tod.filter(r => r.status === "completed").length, c: "#00d68f" },
+    { l: "Em Andamento", v: tod.filter(r => r.status === "in_progress").length, c: "#ffb300" },
+    { l: "Colaboradores", v: users.filter(u => u.role !== "admin" && u.active).length, c: "#a78bfa" },
+  ];
+  return (
+    <div style={{ padding: 16 }}>
+      <div style={{ color: "#fff", fontWeight: 800, fontSize: 20, marginBottom: 16 }}>Dashboard</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
+        {stats.map((s, i) => <Card key={i} style={{ padding: 16 }}><div style={{ color: C.muted, fontSize: 11, marginBottom: 6, letterSpacing: 1 }}>{s.l}</div><div style={{ color: s.c, fontSize: 34, fontWeight: 900 }}>{s.v}</div></Card>)}
+      </div>
+      <div style={{ color: C.muted, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>Atividade Recente</div>
+      {records.length === 0 ? <Card style={{ padding: 32, textAlign: "center" }}><div style={{ color: C.muted, fontSize: 13 }}>Nenhuma ronda registrada ainda</div></Card> :
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {records.slice().sort((a, b) => new Date(b.startTime) - new Date(a.startTime)).slice(0, 6).map(r => (
+            <Card key={r.id} style={{ padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: ST[r.status]?.c, flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}><div style={{ color: "#fff", fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.routeName}</div><div style={{ color: C.muted, fontSize: 11 }}>{r.userName} • {fmt.time(r.startTime)}</div></div>
+              <div style={{ background: ST[r.status]?.bg, color: ST[r.status]?.c, fontSize: 10, padding: "3px 8px", borderRadius: 20, flexShrink: 0, fontWeight: 700 }}>{ST[r.status]?.label}</div>
+            </Card>
+          ))}
+        </div>}
+    </div>
+  );
+}
+
+function AUsers({ users }) {
+  const [modal, setModal] = useState(null);
+  const [form, setForm] = useState({ name: "", username: "", password: "", role: "collaborator" });
+  const [err, setErr] = useState("");
+  const open = (u = null) => { setForm(u ? { name: u.name, username: u.username, password: u.password, role: u.role } : { name: "", username: "", password: "", role: "collaborator" }); setModal(u || "new"); setErr(""); };
+  const save = async () => {
+    if (!form.name.trim() || !form.username.trim() || !form.password.trim()) { setErr("Preencha todos os campos"); return; }
+    if (users.find(u => u.username === form.username && (modal === "new" || u.id !== modal.id))) { setErr("Usuário já existe"); return; }
+    if (modal === "new") await setItem("users", genId(), { ...form, active: true, createdAt: new Date().toISOString() });
+    else await updateItem("users", modal.id, form);
+    setModal(null);
+  };
+  const del = async (id) => { if (!confirm("Excluir colaborador?")) return; await removeItem("users", id); };
+  const toggle = async (u) => { await updateItem("users", u.id, { active: !u.active }); };
+  return (
+    <div style={{ padding: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <div style={{ color: "#fff", fontWeight: 800, fontSize: 20 }}>Colaboradores</div>
+        <Btn onClick={() => open()} style={{ padding: "8px 14px", fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={15} />Novo</Btn>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {users.map(u => (
+          <Card key={u.id} style={{ padding: "12px 14px", display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 40, height: 40, borderRadius: "50%", background: u.role === "admin" ? "#4c1d95" : "#1e3a8a", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 900, fontSize: 15, flexShrink: 0 }}>{u.name.charAt(0).toUpperCase()}</div>
+            <div style={{ flex: 1, minWidth: 0 }}><div style={{ color: "#fff", fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{u.name}</div><div style={{ color: C.muted, fontSize: 11 }}>@{u.username} • {u.role === "admin" ? "Admin" : "Colaborador"}</div></div>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <button onClick={() => toggle(u)} style={{ width: 10, height: 10, borderRadius: "50%", background: u.active ? "#00d68f" : "#475569", border: "none", cursor: "pointer", flexShrink: 0 }} />
+              <button onClick={() => open(u)} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted }}><Icon name="edit" size={15} /></button>
+              {u.id !== "admin-seed" && <button onClick={() => del(u.id)} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted }}><Icon name="trash" size={15} /></button>}
+            </div>
+          </Card>
+        ))}
+      </div>
+      {modal && <BottomModal title={modal === "new" ? "Novo Colaborador" : "Editar Colaborador"} onClose={() => setModal(null)}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+          {[["name", "Nome completo", "text"], ["username", "Usuário (login)", "text"], ["password", "Senha", "password"]].map(([f, ph, t]) => (
+            <input key={f} type={t} placeholder={ph} value={form[f]} onChange={e => setForm(p => ({ ...p, [f]: e.target.value }))} style={{ background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" }} />
+          ))}
+          <select value={form.role} onChange={e => setForm(p => ({ ...p, role: e.target.value }))} style={{ background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" }}>
+            <option value="collaborator">Colaborador</option><option value="admin">Administrador</option>
+          </select>
+        </div>
+        {err && <div style={{ color: "#ff3d71", fontSize: 12, marginBottom: 10 }}>{err}</div>}
+        <div style={{ display: "flex", gap: 10 }}><Btn onClick={() => setModal(null)} color="#1e293b" style={{ flex: 1 }}>Cancelar</Btn><Btn onClick={save} style={{ flex: 1 }}>Salvar</Btn></div>
+      </BottomModal>}
+    </div>
+  );
+}
+
+function APoints({ points }) {
+  const [modal, setModal] = useState(false);
+  const [form, setForm] = useState({ name: "", description: "", location: "" });
+  const [qr, setQr] = useState(null);
+  const [printList, setPrintList] = useState([]);
+  const save = async () => {
+    if (!form.name.trim()) return;
+    await setItem("points", genId(), { ...form, createdAt: new Date().toISOString() });
+    setModal(false); setForm({ name: "", description: "", location: "" });
+  };
+  const del = async (id) => { if (!confirm("Excluir ponto?")) return; await removeItem("points", id); };
+  const doPrint = (list) => { setPrintList(list); setTimeout(() => window.print(), 300); };
+  return (
+    <div style={{ padding: 16 }}>
+      <style>{"@media print { body * { visibility: hidden; } .ahs-print-area, .ahs-print-area * { visibility: visible; } .ahs-print-area { position: absolute !important; top: 0; left: 0; width: 100%; } }"}</style>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, gap: 8 }}>
+        <div style={{ color: "#fff", fontWeight: 800, fontSize: 20 }}>Pontos de Ronda</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {points.length > 0 && <Btn onClick={() => doPrint(points)} color="#1e293b" style={{ padding: "8px 12px", fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}><Icon name="printer" size={15} />Imprimir tudo</Btn>}
+          <Btn onClick={() => setModal(true)} style={{ padding: "8px 14px", fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={15} />Novo</Btn>
+        </div>
+      </div>
+      {points.length === 0 && <Card style={{ padding: 40, textAlign: "center" }}><Icon name="mappin" size={36} color={C.border} style={{ margin: "0 auto 10px" }} /><div style={{ color: C.muted, fontSize: 13 }}>Nenhum ponto cadastrado</div></Card>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {points.map(p => (
+          <Card key={p.id} style={{ padding: "12px 14px", display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: "#0c2a4a", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="mappin" size={18} color="#38bdf8" /></div>
+            <div style={{ flex: 1, minWidth: 0 }}><div style={{ color: "#fff", fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>{p.location && <div style={{ color: C.muted, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.location}</div>}</div>
+            <div style={{ display: "flex", gap: 12 }}>
+              <button onClick={() => setQr(p)} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted }}><Icon name="qrcode" size={18} /></button>
+              <button onClick={() => doPrint([p])} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted }}><Icon name="printer" size={16} /></button>
+              <button onClick={() => del(p.id)} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted }}><Icon name="trash" size={15} /></button>
+            </div>
+          </Card>
+        ))}
+      </div>
+      {modal && <BottomModal title="Novo Ponto" onClose={() => setModal(false)}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+          {[["name", "Nome do ponto (ex: Portaria Principal)"], ["description", "Descrição"], ["location", "Localização"]].map(([f, ph]) => (
+            <input key={f} placeholder={ph} value={form[f]} onChange={e => setForm(p => ({ ...p, [f]: e.target.value }))} style={{ background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" }} />
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 10 }}><Btn onClick={() => setModal(false)} color="#1e293b" style={{ flex: 1 }}>Cancelar</Btn><Btn onClick={save} style={{ flex: 1 }}>Salvar</Btn></div>
+      </BottomModal>}
+      {qr && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 99, padding: 24 }} onClick={() => setQr(null)}>
+          <Card style={{ padding: 24, maxWidth: 300, width: "100%", textAlign: "center" }} onClick={e => e.stopPropagation()}>
+            <div style={{ color: "#fff", fontWeight: 700, fontSize: 16, marginBottom: 4 }}>{qr.name}</div>
+            {qr.location && <div style={{ color: C.muted, fontSize: 12, marginBottom: 16 }}>{qr.location}</div>}
+            <div style={{ background: "#fff", borderRadius: 12, padding: 12, display: "inline-block", marginBottom: 12 }}><QRImage data={"AHS_POINT_" + qr.id} size={180} /></div>
+            <div style={{ color: "#334155", fontSize: 9, wordBreak: "break-all", marginBottom: 16 }}>AHS_POINT_{qr.id}</div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <Btn onClick={() => doPrint([qr])} color="#1e293b" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}><Icon name="printer" size={15} />Imprimir</Btn>
+              <Btn onClick={() => setQr(null)} style={{ flex: 1 }}>Fechar</Btn>
+            </div>
+          </Card>
+        </div>
+      )}
+      <div className="ahs-print-area" style={{ position: "fixed", top: 0, left: -99999, width: 760, background: "#fff", padding: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20, borderBottom: "2px solid #111", paddingBottom: 12 }}>
+          <div style={{ fontWeight: 900, fontSize: 20, color: "#111" }}>A.H.S</div>
+          <div style={{ color: "#555", fontSize: 13 }}>Pontos de Ronda — QR Codes para fixar no local</div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+          {printList.map(p => (
+            <div key={p.id} style={{ border: "2px dashed #999", borderRadius: 10, padding: 16, textAlign: "center", breakInside: "avoid" }}>
+              <div style={{ fontWeight: 800, fontSize: 16, color: "#111", marginBottom: 2 }}>{p.name}</div>
+              {p.location && <div style={{ color: "#555", fontSize: 12, marginBottom: 8 }}>{p.location}</div>}
+              <img src={"https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=AHS_POINT_" + p.id} alt="QR" style={{ width: 220, height: 220 }} />
+              <div style={{ color: "#999", fontSize: 9, marginTop: 6, wordBreak: "break-all" }}>AHS_POINT_{p.id}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ARoutes({ routes, points }) {
+  const [modal, setModal] = useState(false);
+  const [form, setForm] = useState({ name: "", description: "", pointIds: [] });
+  const tog = (id) => setForm(f => ({ ...f, pointIds: f.pointIds.includes(id) ? f.pointIds.filter(p => p !== id) : [...f.pointIds, id] }));
+  const save = async () => {
+    if (!form.name.trim() || !form.pointIds.length) return;
+    await setItem("routes", genId(), { ...form, createdAt: new Date().toISOString() });
+    setModal(false); setForm({ name: "", description: "", pointIds: [] });
+  };
+  const del = async (id) => { if (!confirm("Excluir ronda?")) return; await removeItem("routes", id); };
+  return (
+    <div style={{ padding: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <div style={{ color: "#fff", fontWeight: 800, fontSize: 20 }}>Rondas</div>
+        <Btn onClick={() => setModal(true)} style={{ padding: "8px 14px", fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}><Icon name="plus" size={15} />Nova</Btn>
+      </div>
+      {routes.length === 0 && <Card style={{ padding: 40, textAlign: "center" }}><Icon name="qrcode" size={36} color={C.border} style={{ margin: "0 auto 10px" }} /><div style={{ color: C.muted }}>Nenhuma ronda cadastrada</div></Card>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {routes.map(r => (
+          <Card key={r.id} style={{ padding: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 40, height: 40, borderRadius: 10, background: "#052e16", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="qrcode" size={18} color="#4ade80" /></div>
+              <div style={{ flex: 1 }}><div style={{ color: "#fff", fontWeight: 600 }}>{r.name}</div><div style={{ color: C.muted, fontSize: 11 }}>{r.pointIds.length} ponto{r.pointIds.length !== 1 ? "s" : ""}</div></div>
+              <button onClick={() => del(r.id)} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted }}><Icon name="trash" size={15} /></button>
+            </div>
+            {r.pointIds.length > 0 && <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 10 }}>{r.pointIds.map(pid => { const pt = points.find(p => p.id === pid); return pt ? <span key={pid} style={{ background: C.bg, color: "#94a3b8", fontSize: 10, padding: "3px 8px", borderRadius: 20 }}>{pt.name}</span> : null; })}</div>}
+          </Card>
+        ))}
+      </div>
+      {modal && <BottomModal title="Nova Ronda" onClose={() => setModal(false)}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 }}>
+          <input placeholder="Nome da ronda" value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} style={{ background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" }} />
+          <input placeholder="Descrição (opcional)" value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))} style={{ background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" }} />
+        </div>
+        <div style={{ color: C.muted, fontSize: 12, marginBottom: 8 }}>Selecione os pontos:</div>
+        {points.length === 0 ? <div style={{ color: "#475569", fontSize: 12, marginBottom: 12 }}>Cadastre pontos primeiro</div> :
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
+            {points.map(pt => { const sel = form.pointIds.includes(pt.id); return (
+              <button key={pt.id} onClick={() => tog(pt.id)} style={{ background: sel ? "rgba(30,111,255,0.1)" : C.bg, border: "1px solid " + (sel ? "#1e6fff" : C.border), borderRadius: 10, padding: "10px 12px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+                <div style={{ width: 18, height: 18, borderRadius: 4, background: sel ? "#1e6fff" : "#1e293b", border: "1px solid " + (sel ? "#1e6fff" : "#334155"), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{sel && <Icon name="check" size={11} color="#fff" />}</div>
+                <span style={{ color: "#fff", fontSize: 13 }}>{pt.name}</span>
+              </button>
+            ); })}
+          </div>}
+        <div style={{ display: "flex", gap: 10 }}><Btn onClick={() => setModal(false)} color="#1e293b" style={{ flex: 1 }}>Cancelar</Btn><Btn onClick={save} style={{ flex: 1 }}>Salvar</Btn></div>
+      </BottomModal>}
+    </div>
+  );
+}
+
+function AReports({ records }) {
+  const [detail, setDetail] = useState(null);
+  if (detail) return (
+    <div style={{ padding: 16 }}>
+      <button onClick={() => setDetail(null)} style={{ display: "flex", alignItems: "center", gap: 8, color: C.muted, background: "none", border: "none", cursor: "pointer", marginBottom: 16, fontSize: 13 }}><Icon name="arrowleft" size={17} />Voltar</button>
+      <Card style={{ padding: 16, marginBottom: 12 }}>
+        <div style={{ color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase" }}>Ronda</div>
+        <div style={{ color: "#fff", fontWeight: 800, fontSize: 18, marginTop: 2 }}>{detail.routeName}</div>
+        <div style={{ color: "#94a3b8", fontSize: 13, marginTop: 2 }}>{detail.userName}</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+          <div><div style={{ color: "#475569", fontSize: 10 }}>INÍCIO</div><div style={{ color: "#fff", fontSize: 12, marginTop: 2 }}>{fmt.dt(detail.startTime)}</div></div>
+          <div><div style={{ color: "#475569", fontSize: 10 }}>DURAÇÃO</div><div style={{ color: "#fff", fontSize: 12, marginTop: 2 }}>{fmt.dur(detail.startTime, detail.endTime)}</div></div>
+        </div>
+        <div style={{ marginTop: 12 }}><span style={{ background: ST[detail.status]?.bg, color: ST[detail.status]?.c, fontSize: 11, padding: "4px 10px", borderRadius: 20, fontWeight: 700 }}>{ST[detail.status]?.label}</span></div>
+      </Card>
+      <div style={{ color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>Pontos Escaneados ({(detail.scans || []).length}/{detail.totalPoints})</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {(detail.scans || []).map((s, i) => <Card key={i} style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, background: "rgba(0,214,143,0.06)", border: "1px solid rgba(0,214,143,0.2)" }}><Icon name="checkcircle" size={16} color="#00d68f" /><div><div style={{ color: "#fff", fontSize: 13, fontWeight: 600 }}>{s.pointName}</div><div style={{ color: "#00d68f", fontSize: 11 }}>{fmt.time(s.scannedAt)}</div></div></Card>)}
+        {!(detail.scans || []).length && <div style={{ color: C.muted, fontSize: 13, textAlign: "center", padding: 20 }}>Nenhum ponto escaneado</div>}
+      </div>
+    </div>
+  );
+  return (
+    <div style={{ padding: 16 }}>
+      <div style={{ color: "#fff", fontWeight: 800, fontSize: 20, marginBottom: 16 }}>Relatórios</div>
+      {records.length === 0 ? <Card style={{ padding: 40, textAlign: "center" }}><Icon name="filetext" size={36} color={C.border} style={{ margin: "0 auto 10px" }} /><div style={{ color: C.muted }}>Nenhuma ronda registrada</div></Card> :
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {records.slice().sort((a, b) => new Date(b.startTime) - new Date(a.startTime)).map(r => (
+            <button key={r.id} onClick={() => setDetail(r)} style={{ background: C.card, border: "1px solid " + C.border, borderRadius: 12, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer", textAlign: "left", width: "100%" }}>
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: ST[r.status]?.c, flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}><div style={{ color: "#fff", fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.routeName}</div><div style={{ color: C.muted, fontSize: 11 }}>{r.userName} • {fmt.dt(r.startTime)}</div></div>
+              <Icon name="chevronright" size={15} color={C.muted} />
+            </button>
+          ))}
+        </div>}
+    </div>
+  );
+}
+
+function BottomModal({ title, children, onClose }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 99 }}>
+      <div style={{ background: C.card, borderRadius: "24px 24px 0 0", width: "100%", maxWidth: 500, maxHeight: "90vh", overflowY: "auto", padding: 24, paddingBottom: 32 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+          <div style={{ color: "#fff", fontWeight: 800, fontSize: 16 }}>{title}</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted }}><Icon name="x" size={20} /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// PATROL (COLABORADOR)
+// ═══════════════════════════════════════════════════════════
+function Patrol({ currentUser, routes, points, records, onLogout }) {
+  const [tab, setTab] = useState("home");
+  const [patrol, setPatrol] = useState(null);
+  const myRec = records.filter(r => r.userId === currentUser.id);
+  const tabs = [{ id: "home", icon: "home", label: "Início" }, { id: "scan", icon: "camera", label: "Escanear" }, { id: "history", icon: "clock", label: "Histórico" }];
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column" }}>
+      <Header title={"Olá, " + currentUser.name.split(" ")[0]} sub="" onLogout={onLogout} />
+      <div style={{ flex: 1, overflowY: "auto", paddingBottom: 8 }}>
+        {tab === "home" && <PHome currentUser={currentUser} routes={routes} records={myRec} patrol={patrol} setPatrol={setPatrol} setTab={setTab} />}
+        {tab === "scan" && <PScanner patrol={patrol} setPatrol={setPatrol} points={points} currentUser={currentUser} setTab={setTab} />}
+        {tab === "history" && <PHistory records={myRec} />}
+      </div>
+      <BottomNav tabs={tabs} active={tab} onChange={setTab} />
+    </div>
+  );
+}
+
+function PHome({ currentUser, routes, records, patrol, setPatrol, setTab }) {
+  const start = async (route) => {
+    if (patrol) return;
+    const id = genId();
+    const rec = { id, routeId: route.id, routeName: route.name, userId: currentUser.id, userName: currentUser.name, startTime: new Date().toISOString(), endTime: null, status: "in_progress", scans: [], totalPoints: route.pointIds.length };
+    await setItem("records", id, rec);
+    setPatrol({ ...rec, route });
+    setTab("scan");
+  };
+  const today = new Date().toDateString();
+  const todayRec = records.filter(r => new Date(r.startTime).toDateString() === today);
+  return (
+    <div style={{ padding: 16 }}>
+      {patrol ? (
+        <div style={{ background: "rgba(255,179,0,0.08)", border: "1px solid rgba(255,179,0,0.3)", borderRadius: 16, padding: 16, marginBottom: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div>
+              <div style={{ color: "#ffb300", fontSize: 10, letterSpacing: 2, fontWeight: 700, textTransform: "uppercase" }}>Em Andamento</div>
+              <div style={{ color: "#fff", fontWeight: 800, fontSize: 18, marginTop: 4 }}>{patrol.routeName}</div>
+              <div style={{ color: "#fbbf24", fontSize: 13, marginTop: 2 }}>{(patrol.scans || []).length} / {patrol.totalPoints} pontos</div>
+            </div>
+            <div style={{ width: 10, height: 10, borderRadius: "50%", background: "#ffb300", boxShadow: "0 0 10px #ffb300", marginTop: 4 }} />
+          </div>
+          <button onClick={() => setTab("scan")} style={{ marginTop: 14, background: "#92400e", border: "none", borderRadius: 10, padding: "10px 20px", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", width: "100%" }}>Continuar Ronda →</button>
+        </div>
+      ) : (
+        <Card style={{ padding: 16, display: "flex", alignItems: "center", gap: 14, marginBottom: 20 }}>
+          <div style={{ width: 48, height: 48, borderRadius: "50%", background: "rgba(0,214,143,0.1)", border: "1px solid rgba(0,214,143,0.3)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="checkcircle" size={24} color="#00d68f" /></div>
+          <div><div style={{ color: "#fff", fontWeight: 700 }}>Pronto para rondar</div><div style={{ color: C.muted, fontSize: 12 }}>Selecione uma ronda abaixo</div></div>
+        </Card>
+      )}
+      <div style={{ color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>Rondas Disponíveis</div>
+      {routes.length === 0 ? <Card style={{ padding: 32, textAlign: "center" }}><div style={{ color: C.muted, fontSize: 13 }}>Nenhuma ronda disponível</div></Card> :
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+          {routes.map(r => (
+            <Card key={r.id} style={{ padding: 14, display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ width: 40, height: 40, borderRadius: 10, background: "#0c2a4a", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><Icon name="qrcode" size={18} color="#38bdf8" /></div>
+              <div style={{ flex: 1 }}><div style={{ color: "#fff", fontWeight: 700 }}>{r.name}</div><div style={{ color: C.muted, fontSize: 11 }}>{r.pointIds.length} ponto{r.pointIds.length !== 1 ? "s" : ""}</div></div>
+              <Btn onClick={() => start(r)} disabled={!!patrol} style={{ padding: "8px 16px", fontSize: 12 }}>Iniciar</Btn>
+            </Card>
+          ))}
+        </div>}
+      {todayRec.length > 0 && <>
+        <div style={{ color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>Hoje</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {todayRec.slice().sort((a, b) => new Date(b.startTime) - new Date(a.startTime)).map(r => (
+            <Card key={r.id} style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 7, height: 7, borderRadius: "50%", background: ST[r.status]?.c, flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}><div style={{ color: "#fff", fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.routeName}</div><div style={{ color: C.muted, fontSize: 11 }}>{fmt.time(r.startTime)} • {(r.scans || []).length}/{r.totalPoints} pts</div></div>
+            </Card>
+          ))}
+        </div>
+      </>}
+    </div>
+  );
+}
+
+function PScanner({ patrol, setPatrol, points, currentUser, setTab }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const coolRef = useRef(0);
+  const patrolRef = useRef(patrol);
+  const [cam, setCam] = useState(false);
+  const [lastScan, setLastScan] = useState(null);
+  const [scanErr, setScanErr] = useState("");
+  const [manual, setManual] = useState("");
+  const [showM, setShowM] = useState(false);
+
+  useEffect(() => { patrolRef.current = patrol; }, [patrol]);
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop()); }, []);
+
+  const processQR = async (code) => {
+    const p = patrolRef.current; if (!p) return;
+    setScanErr("");
+    if (!code.startsWith("AHS_POINT_")) { setScanErr("QR Code inválido"); return; }
+    const pid = code.replace("AHS_POINT_", "");
+    const scanned = (p.scans || []).map(s => s.pointId);
+    if (scanned.includes(pid)) { setScanErr("Ponto já registrado"); return; }
+    if (!p.route?.pointIds?.includes(pid)) { setScanErr("Ponto não pertence a esta ronda"); return; }
+    const pt = points.find(x => x.id === pid); if (!pt) { setScanErr("Ponto não encontrado"); return; }
+    const scan = { pointId: pid, pointName: pt.name, scannedAt: new Date().toISOString() };
+    const newScans = [...(p.scans || []), scan];
+    patrolRef.current = { ...p, scans: newScans };
+    setPatrol(prev => ({ ...prev, scans: newScans }));
+    setLastScan(pt.name); setTimeout(() => setLastScan(null), 3000);
+    await updateItem("records", p.id, { scans: newScans });
+  };
+
+  const startCam = async () => {
+    setScanErr("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 } } });
+      streamRef.current = stream;
+      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
+      setCam(true);
+      if ("BarcodeDetector" in window) {
+        const det = new window.BarcodeDetector({ formats: ["qr_code"] });
+        const loop = async () => {
+          if (!streamRef.current) return;
+          const now = Date.now();
+          if (now - coolRef.current > 2000) {
+            try { const codes = await det.detect(videoRef.current); if (codes.length) { coolRef.current = now; await processQR(codes[0].rawValue); } } catch (e) {}
+          }
+          rafRef.current = requestAnimationFrame(loop);
+        };
+        rafRef.current = requestAnimationFrame(loop);
+      } else { setScanErr("Detecção automática indisponível neste navegador. Use o campo manual."); setShowM(true); }
+    } catch (e) { setScanErr("Câmera indisponível (" + (e.message || "erro") + "). Use o campo manual."); setShowM(true); }
+  };
+
+  const stopCam = () => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+    setCam(false);
+  };
+
+  const finish = async () => {
+    stopCam();
+    const p = patrolRef.current; if (!p) return;
+    const status = (p.scans || []).length >= p.totalPoints && p.totalPoints > 0 ? "completed" : "incomplete";
+    await updateItem("records", p.id, { scans: p.scans || [], status, endTime: new Date().toISOString() });
+    setPatrol(null); setTab("home");
+  };
+
+  if (!patrol) return (
+    <div style={{ padding: 16, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: 400 }}>
+      <Icon name="alert" size={40} color="#ffb300" style={{ marginBottom: 12 }} />
+      <div style={{ color: "#fff", fontWeight: 700, fontSize: 16, marginBottom: 4 }}>Nenhuma ronda ativa</div>
+      <div style={{ color: C.muted, fontSize: 13, marginBottom: 20 }}>Inicie uma ronda na tela inicial</div>
+      <Btn onClick={() => setTab("home")}>Ir para Início</Btn>
+    </div>
+  );
+
+  const scannedIds = (patrol.scans || []).map(s => s.pointId);
+  const rPts = (patrol.route?.pointIds || []).map(id => points.find(p => p.id === id)).filter(Boolean);
+  const allDone = rPts.length > 0 && rPts.every(p => scannedIds.includes(p.id));
+
+  return (
+    <div style={{ padding: 16 }}>
+      <Card style={{ padding: 14, marginBottom: 12 }}>
+        <div style={{ color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase" }}>Ronda Ativa</div>
+        <div style={{ color: "#fff", fontWeight: 800, fontSize: 17, marginTop: 2 }}>{patrol.routeName}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+          <div style={{ flex: 1, background: C.bg, borderRadius: 4, height: 6, overflow: "hidden" }}><div style={{ height: "100%", borderRadius: 4, background: allDone ? "#00d68f" : "#1e6fff", width: (rPts.length > 0 ? (scannedIds.length / rPts.length) * 100 : 0) + "%", transition: "width 0.4s" }} /></div>
+          <span style={{ color: C.muted, fontSize: 11 }}>{scannedIds.length}/{rPts.length}</span>
+        </div>
+      </Card>
+      <Card style={{ overflow: "hidden", marginBottom: 12 }}>
+        {cam ? (
+          <div style={{ position: "relative" }}>
+            <video ref={videoRef} autoPlay playsInline muted style={{ width: "100%", height: 220, objectFit: "cover", display: "block", background: "#000" }} />
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+              <div style={{ width: 180, height: 180, border: "2px solid rgba(30,111,255,0.7)", borderRadius: 14 }} />
+            </div>
+            <div style={{ position: "absolute", bottom: 8, left: "50%", transform: "translateX(-50%)", background: "rgba(30,111,255,0.15)", border: "1px solid rgba(30,111,255,0.3)", borderRadius: 20, padding: "4px 12px", color: "#60a5fa", fontSize: 11 }}>Aponte para o QR Code</div>
+            <button onClick={stopCam} style={{ position: "absolute", top: 8, right: 8, background: "rgba(0,0,0,0.6)", border: "none", borderRadius: "50%", width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff" }}><Icon name="x" size={16} /></button>
+          </div>
+        ) : (
+          <div style={{ padding: 32, textAlign: "center" }}>
+            <Icon name="camera" size={40} color="#334155" style={{ margin: "0 auto 12px" }} />
+            <div style={{ color: C.muted, fontSize: 12, marginBottom: 16 }}>Aponte a câmera para o QR Code do ponto</div>
+            <Btn onClick={startCam} style={{ padding: "12px 32px" }}>Abrir Câmera</Btn>
+          </div>
+        )}
+      </Card>
+      {lastScan && <div style={{ background: "rgba(0,214,143,0.08)", border: "1px solid rgba(0,214,143,0.3)", borderRadius: 12, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}><Icon name="checkcircle" size={18} color="#00d68f" /><div><div style={{ color: "#00d68f", fontWeight: 700, fontSize: 13 }}>Ponto registrado!</div><div style={{ color: "#6ee7b7", fontSize: 11 }}>{lastScan}</div></div></div>}
+      {scanErr && <div style={{ background: "rgba(255,61,113,0.08)", border: "1px solid rgba(255,61,113,0.3)", borderRadius: 12, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}><Icon name="alert" size={16} color="#ff3d71" /><div style={{ color: "#fca5a5", fontSize: 13 }}>{scanErr}</div></div>}
+      <button onClick={() => setShowM(v => !v)} style={{ background: "none", border: "none", cursor: "pointer", color: C.muted, fontSize: 12, display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}><Icon name="alignleft" size={14} />{showM ? "Ocultar entrada manual" : "Usar código manual"}</button>
+      {showM && <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <input value={manual} onChange={e => setManual(e.target.value)} placeholder="Cole o código do QR aqui" style={{ flex: 1, background: C.card, border: "1px solid " + C.border, borderRadius: 10, padding: "10px 14px", color: "#fff", fontSize: 13, outline: "none" }} />
+        <Btn onClick={async () => { await processQR(manual.trim()); setManual(""); }} style={{ padding: "10px 16px" }}>OK</Btn>
+      </div>}
+      <div style={{ color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>Pontos da Ronda</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
+        {rPts.map(pt => {
+          const done = scannedIds.includes(pt.id);
+          const sc = (patrol.scans || []).find(s => s.pointId === pt.id);
+          return (
+            <div key={pt.id} style={{ background: done ? "rgba(0,214,143,0.06)" : C.card, border: "1px solid " + (done ? "rgba(0,214,143,0.25)" : C.border), borderRadius: 12, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 26, height: 26, borderRadius: "50%", background: done ? "#00d68f" : "#1e293b", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{done ? <Icon name="check" size={13} color="#fff" /> : <span style={{ color: "#475569", fontSize: 14 }}>○</span>}</div>
+              <div style={{ flex: 1 }}><div style={{ color: done ? "#00d68f" : "#fff", fontSize: 13, fontWeight: 600 }}>{pt.name}</div>{sc && <div style={{ color: "#6ee7b7", fontSize: 11 }}>{fmt.time(sc.scannedAt)}</div>}</div>
+            </div>
+          );
+        })}
+      </div>
+      <button onClick={finish} style={{ width: "100%", background: allDone ? "#166534" : "#7f1d1d", border: "1px solid " + (allDone ? "#15803d" : "#991b1b"), borderRadius: 14, padding: 16, color: "#fff", fontWeight: 900, fontSize: 16, cursor: "pointer" }}>{allDone ? "✓ FINALIZAR RONDA" : "✗ ENCERRAR INCOMPLETO"}</button>
+    </div>
+  );
+}
+
+function PHistory({ records }) {
+  return (
+    <div style={{ padding: 16 }}>
+      <div style={{ color: "#fff", fontWeight: 800, fontSize: 20, marginBottom: 16 }}>Meu Histórico</div>
+      {records.length === 0 ? <Card style={{ padding: 40, textAlign: "center" }}><Icon name="clock" size={36} color={C.border} style={{ margin: "0 auto 10px" }} /><div style={{ color: C.muted }}>Nenhuma ronda realizada</div></Card> :
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {records.slice().sort((a, b) => new Date(b.startTime) - new Date(a.startTime)).map(r => (
+            <Card key={r.id} style={{ padding: 14 }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: ST[r.status]?.c, marginTop: 5, flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ color: "#fff", fontWeight: 700 }}>{r.routeName}</div>
+                  <div style={{ color: C.muted, fontSize: 11, marginTop: 2 }}>{fmt.dt(r.startTime)} • {(r.scans || []).length}/{r.totalPoints} pts</div>
+                  <div style={{ color: C.muted, fontSize: 11 }}>Duração: {fmt.dur(r.startTime, r.endTime)}</div>
+                </div>
+                <span style={{ background: ST[r.status]?.bg, color: ST[r.status]?.c, fontSize: 10, padding: "3px 8px", borderRadius: 20, fontWeight: 700, flexShrink: 0 }}>{ST[r.status]?.label}</span>
+              </div>
+            </Card>
+          ))}
+        </div>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+<script>
+  setTimeout(function() {
+    var root = document.getElementById('root');
+    if (root && root.children.length === 0) {
+      showErr('NADA CARREGOU depois de 6 segundos. Possíveis causas: sem internet, ou algum dos scripts (React/Babel/Firebase) foi bloqueado. Verifique a conexão e tente recarregar a página.');
+    }
+  }, 6000);
+</script>
+</body>
+</html>
