@@ -73,15 +73,23 @@ const removeItem = (name, id) => fdb.collection(name).doc(id).delete();
 // ═══════════════════════════════════════════════════════════
 const genId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 function getLocation(timeout) {
-  timeout = timeout || 6000;
+  timeout = timeout || 8000;
   return new Promise(function (resolve) {
     if (!navigator.geolocation) { resolve(null); return; }
     var done = false;
-    var t = setTimeout(function () { if (!done) { done = true; resolve(null); } }, timeout);
+    function finish(loc) { if (!done) { done = true; resolve(loc); } }
+    var t = setTimeout(function () { finish(null); }, timeout);
     navigator.geolocation.getCurrentPosition(
-      function (pos) { if (!done) { done = true; clearTimeout(t); resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }); } },
-      function () { if (!done) { done = true; clearTimeout(t); resolve(null); } },
-      { enableHighAccuracy: true, timeout: timeout, maximumAge: 10000 }
+      function (pos) { clearTimeout(t); finish({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }); },
+      function () {
+        // GPS de precisão falhou/demorou: tenta localização mais rápida (rede/wifi)
+        navigator.geolocation.getCurrentPosition(
+          function (pos) { clearTimeout(t); finish({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }); },
+          function () { clearTimeout(t); finish(null); },
+          { enableHighAccuracy: false, timeout: timeout, maximumAge: 60000 }
+        );
+      },
+      { enableHighAccuracy: true, timeout: Math.floor(timeout / 2), maximumAge: 10000 }
     );
   });
 }
