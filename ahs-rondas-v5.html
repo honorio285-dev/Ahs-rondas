@@ -72,6 +72,19 @@ const removeItem = (name, id) => fdb.collection(name).doc(id).delete();
 // UTILITIES
 // ═══════════════════════════════════════════════════════════
 const genId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+function getLocation(timeout) {
+  timeout = timeout || 6000;
+  return new Promise(function (resolve) {
+    if (!navigator.geolocation) { resolve(null); return; }
+    var done = false;
+    var t = setTimeout(function () { if (!done) { done = true; resolve(null); } }, timeout);
+    navigator.geolocation.getCurrentPosition(
+      function (pos) { if (!done) { done = true; clearTimeout(t); resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }); } },
+      function () { if (!done) { done = true; clearTimeout(t); resolve(null); } },
+      { enableHighAccuracy: true, timeout: timeout, maximumAge: 10000 }
+    );
+  });
+}
 const fmt = {
   time: (d) => new Date(d).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }),
   date: (d) => new Date(d).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit" }),
@@ -489,13 +502,20 @@ function AReports({ records }) {
         h("div", null, h("div", { style: { color: "#475569", fontSize: 10 } }, "INÍCIO"), h("div", { style: { color: "#fff", fontSize: 12, marginTop: 2 } }, fmt.dt(detail.startTime))),
         h("div", null, h("div", { style: { color: "#475569", fontSize: 10 } }, "DURAÇÃO"), h("div", { style: { color: "#fff", fontSize: 12, marginTop: 2 } }, fmt.dur(detail.startTime, detail.endTime)))
       ),
-      h("div", { style: { marginTop: 12 } }, h("span", { style: { background: ST[detail.status] ? ST[detail.status].bg : "#333", color: ST[detail.status] ? ST[detail.status].c : "#fff", fontSize: 11, padding: "4px 10px", borderRadius: 20, fontWeight: 700 } }, ST[detail.status] ? ST[detail.status].label : detail.status))
+      h("div", { style: { marginTop: 12 } }, h("span", { style: { background: ST[detail.status] ? ST[detail.status].bg : "#333", color: ST[detail.status] ? ST[detail.status].c : "#fff", fontSize: 11, padding: "4px 10px", borderRadius: 20, fontWeight: 700 } }, ST[detail.status] ? ST[detail.status].label : detail.status)),
+      detail.startLat != null && h("a", { href: "https://www.google.com/maps?q=" + detail.startLat + "," + detail.startLng, target: "_blank", rel: "noopener", style: { display: "inline-flex", alignItems: "center", gap: 6, color: "#60a5fa", fontSize: 12, marginTop: 10, textDecoration: "none" } }, h(Icon, { name: "mappin", size: 13, color: "#60a5fa" }), "Local de início da ronda")
     ),
     h("div", { style: { color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 } }, "Pontos Escaneados (" + (detail.scans || []).length + "/" + detail.totalPoints + ")"),
     h("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
       (detail.scans || []).map((s, i) => h(Card, { key: i, style: { padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, background: "rgba(0,214,143,0.06)", border: "1px solid rgba(0,214,143,0.2)" } },
         h(Icon, { name: "checkcircle", size: 16, color: "#00d68f" }),
-        h("div", null, h("div", { style: { color: "#fff", fontSize: 13, fontWeight: 600 } }, s.pointName), h("div", { style: { color: "#00d68f", fontSize: 11 } }, fmt.time(s.scannedAt)))
+        h("div", { style: { flex: 1 } },
+          h("div", { style: { color: "#fff", fontSize: 13, fontWeight: 600 } }, s.pointName),
+          h("div", { style: { color: "#00d68f", fontSize: 11 } }, fmt.time(s.scannedAt))
+        ),
+        s.lat != null
+          ? h("a", { href: "https://www.google.com/maps?q=" + s.lat + "," + s.lng, target: "_blank", rel: "noopener", style: { color: "#60a5fa", display: "flex", alignItems: "center", gap: 4, fontSize: 11, textDecoration: "none" } }, h(Icon, { name: "mappin", size: 14, color: "#60a5fa" }), "Mapa")
+          : h("span", { style: { color: "#475569", fontSize: 10 } }, "sem GPS")
       )),
       !(detail.scans || []).length && h("div", { style: { color: C.muted, fontSize: 13, textAlign: "center", padding: 20 } }, "Nenhum ponto escaneado")
     )
@@ -552,7 +572,8 @@ function PHome({ currentUser, routes, records, patrol, setPatrol, setTab }) {
   const start = async (route) => {
     if (patrol) return;
     const id = genId();
-    const rec = { id, routeId: route.id, routeName: route.name, userId: currentUser.id, userName: currentUser.name, startTime: new Date().toISOString(), endTime: null, status: "in_progress", scans: [], totalPoints: route.pointIds.length };
+    const loc = await getLocation();
+    const rec = { id, routeId: route.id, routeName: route.name, userId: currentUser.id, userName: currentUser.name, startTime: new Date().toISOString(), endTime: null, status: "in_progress", scans: [], totalPoints: route.pointIds.length, startLat: loc ? loc.lat : null, startLng: loc ? loc.lng : null };
     await setItem("records", id, rec);
     setPatrol({ ...rec, route });
     setTab("scan");
@@ -622,12 +643,21 @@ function PScanner({ patrol, setPatrol, points, currentUser, setTab }) {
     if (scanned.includes(pid)) { setScanErr("Ponto já registrado"); return; }
     if (!(p.route && p.route.pointIds && p.route.pointIds.includes(pid))) { setScanErr("Ponto não pertence a esta ronda"); return; }
     const pt = points.find(x => x.id === pid); if (!pt) { setScanErr("Ponto não encontrado"); return; }
-    const scan = { pointId: pid, pointName: pt.name, scannedAt: new Date().toISOString() };
+    const scan = { pointId: pid, pointName: pt.name, scannedAt: new Date().toISOString(), lat: null, lng: null };
     const newScans = [...(p.scans || []), scan];
     patrolRef.current = { ...p, scans: newScans };
     setPatrol(prev => ({ ...prev, scans: newScans }));
     setLastScan(pt.name); setTimeout(() => setLastScan(null), 3000);
     await updateItem("records", p.id, { scans: newScans });
+    // captura a localização em segundo plano, sem travar a confirmação do ponto
+    getLocation().then(function (loc) {
+      if (!loc) return;
+      const current = patrolRef.current; if (!current) return;
+      const withLoc = (current.scans || []).map(s => (s.pointId === pid && s.scannedAt === scan.scannedAt) ? { ...s, lat: loc.lat, lng: loc.lng } : s);
+      patrolRef.current = { ...current, scans: withLoc };
+      setPatrol(prev => prev ? { ...prev, scans: withLoc } : prev);
+      updateItem("records", p.id, { scans: withLoc }).catch(function () {});
+    });
   };
 
   const startCam = async () => {
