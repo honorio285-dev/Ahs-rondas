@@ -203,7 +203,8 @@ function Login({ users, onLogin }) {
   const [show, setShow] = useState(false);
   const [err, setErr] = useState("");
   const login = () => {
-    const u = users.find(x => x.username === un.trim() && x.password === pw && x.active);
+    const typed = un.trim().toLowerCase();
+    const u = users.find(x => x.username.trim().toLowerCase() === typed && x.password === pw && x.active);
     if (u) onLogin(u); else setErr("Usuário ou senha incorretos");
   };
   return h("div", { style: { minHeight: "100vh", background: "radial-gradient(ellipse at 60% 0%, #0d1f4a 0%, #0a0f1e 70%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24 } },
@@ -215,7 +216,7 @@ function Login({ users, onLogin }) {
     h("div", { style: { width: "100%", maxWidth: 360 } },
       h("div", { style: { marginBottom: 16 } },
         h("div", { style: { color: C.muted, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 } }, "Usuário"),
-        h("input", { value: un, onChange: e => { setUn(e.target.value); setErr(""); }, onKeyDown: e => e.key === "Enter" && login(), placeholder: "Seu usuário", style: { width: "100%", background: C.card, border: "1px solid " + C.border, borderRadius: 12, padding: "14px 16px", color: "#fff", fontSize: 15, outline: "none", boxSizing: "border-box" } })
+        h("input", { value: un, onChange: e => { setUn(e.target.value); setErr(""); }, onKeyDown: e => e.key === "Enter" && login(), placeholder: "Seu usuário", autoCapitalize: "none", autoCorrect: "off", spellCheck: false, style: { width: "100%", background: C.card, border: "1px solid " + C.border, borderRadius: 12, padding: "14px 16px", color: "#fff", fontSize: 15, outline: "none", boxSizing: "border-box" } })
       ),
       h("div", { style: { marginBottom: 24, position: "relative" } },
         h("div", { style: { color: C.muted, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 } }, "Senha"),
@@ -341,7 +342,7 @@ function AUsers({ users }) {
     modal && h(BottomModal, { title: modal === "new" ? "Novo Colaborador" : "Editar Colaborador", onClose: () => setModal(null) },
       h("div", { style: { display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 } },
         [["name", "Nome completo", "text"], ["username", "Usuário (login)", "text"], ["password", "Senha", "password"]].map(([f, ph, t]) =>
-          h("input", { key: f, type: t, placeholder: ph, value: form[f], onChange: e => setForm(p => ({ ...p, [f]: e.target.value })), style: { background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" } })
+          h("input", { key: f, type: t, placeholder: ph, value: form[f], onChange: e => setForm(p => ({ ...p, [f]: f === "username" ? e.target.value.toLowerCase() : e.target.value })), autoCapitalize: f === "username" ? "none" : undefined, autoCorrect: f === "username" ? "off" : undefined, spellCheck: f === "username" ? false : undefined, style: { background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" } })
         ),
         h("select", { value: form.role, onChange: e => setForm(p => ({ ...p, role: e.target.value })), style: { background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" } },
           h("option", { value: "collaborator" }, "Colaborador"), h("option", { value: "admin" }, "Administrador")
