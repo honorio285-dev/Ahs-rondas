@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>A.H.S - Rondas com QR Code</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; background: #0a0f1e; }
+  input, select, button { font-family: inherit; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="error-box" style="display:none; background:#7f1d1d; color:#fff; padding:16px; font-family:monospace; font-size:13px; white-space:pre-wrap; word-break:break-word;"></div>
+<script>
+  function showErr(msg) {
+    var box = document.getElementById('error-box');
+    box.style.display = 'block';
+    box.textContent += msg + '\n\n---\n\n';
+  }
+  window.onerror = function(msg, src, line, col, err) {
+    showErr('ERRO: ' + msg + '\n(arquivo: ' + src + ', linha ' + line + ', coluna ' + col + ')' + (err && err.stack ? '\n' + err.stack : ''));
+  };
+  window.addEventListener('unhandledrejection', function(e) {
+    showErr('PROMESSA REJEITADA: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
+  });
+</script>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.14.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore-compat.js"></script>
+
+<script>
+(function () {
+const h = React.createElement;
+const { useState, useEffect, useRef } = React;
+
+// ═══════════════════════════════════════════════════════════
+// FIREBASE
+// ═══════════════════════════════════════════════════════════
+const firebaseConfig = {
+  apiKey: "AIzaSyCEFiNlXvv_uM-DZfT33tIi5_aK4-JCt3c",
+  authDomain: "ronda-8cb86.firebaseapp.com",
+  projectId: "ronda-8cb86",
+  storageBucket: "ronda-8cb86.firebasestorage.app",
+  messagingSenderId: "683075797205",
+  appId: "1:683075797205:web:60b3cbdfbf1ae82576e25c",
+  measurementId: "G-8X8LGSPFQE"
+};
+firebase.initializeApp(firebaseConfig);
+const fdb = firebase.firestore();
+
+function useCollection(name) {
+  const [data, setData] = useState([]);
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const unsub = fdb.collection(name).onSnapshot(snap => {
+      setData(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setReady(true);
+    }, err => { console.error("Firestore (" + name + "):", err); setReady(true); });
+    return unsub;
+  }, []);
+  return [data, ready];
+}
+const setItem = (name, id, data) => fdb.collection(name).doc(id).set(data);
+const updateItem = (name, id, data) => fdb.collection(name).doc(id).update(data);
+const removeItem = (name, id) => fdb.collection(name).doc(id).delete();
+
+// ═══════════════════════════════════════════════════════════
+// UTILITIES
+// ═══════════════════════════════════════════════════════════
+const genId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+function getLocation(timeout) {
+  timeout = timeout || 8000;
+  return new Promise(function (resolve) {
+    if (!navigator.geolocation) { resolve(null); return; }
+    var done = false;
+    function finish(loc) { if (!done) { done = true; resolve(loc); } }
+    var t = setTimeout(function () { finish(null); }, timeout);
+    navigator.geolocation.getCurrentPosition(
+      function (pos) { clearTimeout(t); finish({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }); },
+      function () {
+        // GPS de precisão falhou/demorou: tenta localização mais rápida (rede/wifi)
+        navigator.geolocation.getCurrentPosition(
+          function (pos) { clearTimeout(t); finish({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }); },
+          function () { clearTimeout(t); finish(null); },
+          { enableHighAccuracy: false, timeout: timeout, maximumAge: 60000 }
+        );
+      },
+      { enableHighAccuracy: true, timeout: Math.floor(timeout / 2), maximumAge: 10000 }
+    );
+  });
+}
+function compressImage(file, maxDim, quality) {
+  return new Promise(function (resolve, reject) {
+    const reader = new FileReader();
+    reader.onload = function () {
+      const img = new Image();
+      img.onload = function () {
+        let w = img.width, hgt = img.height;
+        if (w > hgt) { if (w > maxDim) { hgt = Math.round(hgt * maxDim / w); w = maxDim; } }
+        else { if (hgt > maxDim) { w = Math.round(w * maxDim / hgt); hgt = maxDim; } }
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = hgt;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, hgt);
+        try { resolve(canvas.toDataURL("image/jpeg", quality)); } catch (e) { reject(e); }
+      };
+      img.onerror = function () { reject(new Error("imagem inválida")); };
+      img.src = reader.result;
+    };
+    reader.onerror = function () { reject(new Error("leitura falhou")); };
+    reader.readAsDataURL(file);
+  });
+}
+const fmt = {
+  time: (d) => new Date(d).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }),
+  date: (d) => new Date(d).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit" }),
+  dt: (d) => fmt.date(d) + " " + fmt.time(d),
+  dur: (s, e) => { if (!e) return "—"; const m = Math.floor((new Date(e) - new Date(s)) / 60000); return m < 60 ? m + " min" : Math.floor(m / 60) + "h " + (m % 60) + "min"; }
+};
+const ST = {
+  completed: { label: "Concluída", c: "#00d68f", bg: "rgba(0,214,143,0.12)" },
+  in_progress: { label: "Em andamento", c: "#ffb300", bg: "rgba(255,179,0,0.12)" },
+  incomplete: { label: "Incompleta", c: "#ff3d71", bg: "rgba(255,61,113,0.12)" }
+};
+
+// ═══════════════════════════════════════════════════════════
+// ICONS
+// ═══════════════════════════════════════════════════════════
+function Icon({ name, size = 18, color = "currentColor", style = {} }) {
+  const s = { width: size, height: size, flexShrink: 0, ...style };
+  const c = { fill: "none", stroke: color, strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" };
+  switch (name) {
+    case "shield": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("path", { d: "M12 2 L20 6 V11 C20 17 16.5 20.5 12 22 C7.5 20.5 4 17 4 11 V6 Z" }));
+    case "qrcode": return h("svg", { viewBox: "0 0 24 24", style: s },
+      h("rect", { x: 3, y: 3, width: 7, height: 7, fill: color }),
+      h("rect", { x: 14, y: 3, width: 7, height: 7, fill: color }),
+      h("rect", { x: 3, y: 14, width: 7, height: 7, fill: color }),
+      h("rect", { x: 14, y: 14, width: 3, height: 3, fill: color }),
+      h("rect", { x: 18, y: 14, width: 3, height: 3, fill: color }),
+      h("rect", { x: 14, y: 18, width: 3, height: 3, fill: color }),
+      h("rect", { x: 18, y: 18, width: 3, height: 3, fill: color })
+    );
+    case "users": return h("svg", { viewBox: "0 0 24 24", style: s, ...c },
+      h("circle", { cx: 9, cy: 7, r: 3.2 }), h("path", { d: "M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6" }),
+      h("circle", { cx: 17, cy: 8, r: 2.6 }), h("path", { d: "M15.5 14.3c2.6.4 4.5 2.6 4.5 5.7" })
+    );
+    case "mappin": return h("svg", { viewBox: "0 0 24 24", style: s, ...c },
+      h("path", { d: "M12 22s7-7.2 7-12.5A7 7 0 0 0 5 9.5C5 14.8 12 22 12 22Z" }), h("circle", { cx: 12, cy: 9.5, r: 2.3 })
+    );
+    case "logout": return h("svg", { viewBox: "0 0 24 24", style: s, ...c },
+      h("path", { d: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" }), h("path", { d: "M16 17l5-5-5-5" }), h("path", { d: "M21 12H9" })
+    );
+    case "plus": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("path", { d: "M12 5v14M5 12h14" }));
+    case "check": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("path", { d: "M5 13l4 4L19 7" }));
+    case "x": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("path", { d: "M6 6l12 12M18 6L6 18" }));
+    case "camera": return h("svg", { viewBox: "0 0 24 24", style: s, ...c },
+      h("path", { d: "M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z" }), h("circle", { cx: 12, cy: 13, r: 3.3 })
+    );
+    case "barchart": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("path", { d: "M5 20V11M12 20V4M19 20v-7" }));
+    case "eye": return h("svg", { viewBox: "0 0 24 24", style: s, ...c },
+      h("path", { d: "M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7Z" }), h("circle", { cx: 12, cy: 12, r: 2.8 })
+    );
+    case "eyeoff": return h("svg", { viewBox: "0 0 24 24", style: s, ...c },
+      h("path", { d: "M2 12s4-7 10-7c2 0 3.7.6 5.1 1.4M22 12s-1.5 2.6-4 4.4M9.9 9.9a2.8 2.8 0 0 0 3.9 3.9" }), h("path", { d: "M3 3l18 18" })
+    );
+    case "trash": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("path", { d: "M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14" }));
+    case "edit": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("path", { d: "M4 20h4l11-11-4-4L4 16Z" }));
+    case "chevronright": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("path", { d: "M9 5l7 7-7 7" }));
+    case "alert": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("path", { d: "M12 3 2 21h20Z" }), h("path", { d: "M12 10v4M12 17.5h.01" }));
+    case "home": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("path", { d: "M4 11.5 12 4l8 7.5" }), h("path", { d: "M6 10v10h12V10" }));
+    case "filetext": return h("svg", { viewBox: "0 0 24 24", style: s, ...c },
+      h("path", { d: "M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" }), h("path", { d: "M9 12h6M9 16h6" })
+    );
+    case "arrowleft": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("path", { d: "M19 12H5M12 5l-7 7 7 7" }));
+    case "refresh": return h("svg", { viewBox: "0 0 24 24", style: s, ...c },
+      h("path", { d: "M4 10a8 8 0 0 1 14-4.6M20 14a8 8 0 0 1-14 4.6" }), h("path", { d: "M18 3v4h-4M6 21v-4h4" })
+    );
+    case "alignleft": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("path", { d: "M3 6h18M3 12h12M3 18h15" }));
+    case "clock": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("circle", { cx: 12, cy: 12, r: 9 }), h("path", { d: "M12 7v5l3.5 2" }));
+    case "printer": return h("svg", { viewBox: "0 0 24 24", style: s, ...c },
+      h("path", { d: "M6 9V3h12v6M6 18H4a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1h16a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2" }), h("rect", { x: 6, y: 14, width: 12, height: 7 })
+    );
+    case "checkcircle": return h("svg", { viewBox: "0 0 24 24", style: s, ...c }, h("circle", { cx: 12, cy: 12, r: 9 }), h("path", { d: "M8 12.5l2.5 2.5L16 9.5" }));
+    default: return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// DESIGN TOKENS
+// ═══════════════════════════════════════════════════════════
+const C = { bg: "#0a0f1e", card: "#111827", border: "#1e293b", blue: "#1e6fff", muted: "#64748b" };
+const Card = ({ children, style = {} }) => h("div", { style: { background: C.card, borderRadius: 16, border: "1px solid " + C.border, ...style } }, children);
+const Btn = ({ children, onClick, color = C.blue, style = {}, disabled = false }) => h("button", { onClick, disabled, style: { background: disabled ? "#1e293b" : color, color: disabled ? "#475569" : "#fff", border: "none", borderRadius: 12, padding: "12px 20px", fontWeight: 700, fontSize: 14, cursor: disabled ? "not-allowed" : "pointer", ...style } }, children);
+
+function QRImage({ data, size = 180 }) {
+  const [status, setStatus] = useState("loading");
+  const [attempt, setAttempt] = useState(0);
+  const url = "https://api.qrserver.com/v1/create-qr-code/?size=" + size + "x" + size + "&data=" + encodeURIComponent(data) + "&_r=" + attempt;
+  if (status === "error") return h("div", { style: { width: size, height: size, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: "#fff", borderRadius: 8 } },
+    h(Icon, { name: "alert", size: 22, color: "#dc2626" }),
+    h("div", { style: { color: "#dc2626", fontSize: 11, textAlign: "center", padding: "0 8px" } }, "Sem internet para gerar o QR Code"),
+    h("button", { onClick: () => { setStatus("loading"); setAttempt(a => a + 1); }, style: { background: "#1e6fff", color: "#fff", border: "none", borderRadius: 8, padding: "4px 10px", fontSize: 11, cursor: "pointer" } }, "Tentar novamente")
+  );
+  return h("img", { src: url, alt: "QR", width: size, height: size, style: { width: size, height: size, display: status === "loading" ? "none" : "block" }, onLoad: () => setStatus("ok"), onError: () => setStatus("error") });
+}
+
+// ═══════════════════════════════════════════════════════════
+// ROOT
+// ═══════════════════════════════════════════════════════════
+function App() {
+  const [user, setUser] = useState(null);
+  const [users, usersReady] = useCollection("users");
+  const [points] = useCollection("points");
+  const [routes] = useCollection("routes");
+  const [records] = useCollection("records");
+
+  useEffect(() => {
+    if (usersReady && users.length === 0) {
+      setItem("users", "admin-seed", { name: "Administrador", username: "admin", password: "admin123", role: "admin", tenantId: "admin-seed", active: true, createdAt: new Date().toISOString() }).catch(() => {});
+    }
+  }, [usersReady, users.length]);
+
+  if (!usersReady) return h("div", { style: { minHeight: "100vh", background: C.bg, display: "flex", alignItems: "center", justifyContent: "center" } },
+    h("div", { style: { textAlign: "center" } },
+      h("div", { style: { width: 72, height: 72, borderRadius: "50%", background: "linear-gradient(135deg,#1e6fff,#00b4ff)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px", boxShadow: "0 0 40px rgba(30,111,255,0.5)" } }, h(Icon, { name: "shield", size: 36, color: "#fff" })),
+      h("div", { style: { color: "#fff", fontWeight: 900, fontSize: 24, letterSpacing: 8 } }, "A.H.S"),
+      h("div", { style: { color: "#1e6fff", fontSize: 10, letterSpacing: 4, marginTop: 4 } }, "CONECTANDO...")
+    )
+  );
+
+  if (!user) return h(Login, { users, onLogin: setUser });
+
+  // ── Isolamento por administrador (multi-tenant) ──
+  // Cada admin é "dono" do próprio painel. tenantId do admin = o próprio id dele.
+  // Colaboradores herdam o tenantId do admin que os criou.
+  // Dados antigos (sem tenantId) ficam com o admin original ("admin-seed").
+  const myTenant = user.role === "admin" ? user.id : (user.tenantId || "admin-seed");
+  const tOf = (x) => x.tenantId || "admin-seed";
+  const fUsers = users.filter(u => tOf(u) === myTenant);
+  const fPoints = points.filter(p => tOf(p) === myTenant);
+  const fRoutes = routes.filter(r => tOf(r) === myTenant);
+  const fRecords = records.filter(r => tOf(r) === myTenant);
+
+  if (user.role === "admin") return h(Admin, { currentUser: user, users: fUsers, allUsers: users, myTenant, points: fPoints, routes: fRoutes, records: fRecords, onLogout: () => setUser(null) });
+  return h(Patrol, { currentUser: user, myTenant, routes: fRoutes, points: fPoints, records: fRecords, onLogout: () => setUser(null) });
+}
+
+// ═══════════════════════════════════════════════════════════
+// LOGIN
+// ═══════════════════════════════════════════════════════════
+function Login({ users, onLogin }) {
+  const [un, setUn] = useState("");
+  const [pw, setPw] = useState("");
+  const [show, setShow] = useState(false);
+  const [err, setErr] = useState("");
+  const login = () => {
+    const typed = un.trim().toLowerCase();
+    const u = users.find(x => x.username.trim().toLowerCase() === typed && x.password === pw && x.active);
+    if (u) onLogin(u); else setErr("Usuário ou senha incorretos");
+  };
+  return h("div", { style: { minHeight: "100vh", background: "radial-gradient(ellipse at 60% 0%, #0d1f4a 0%, #0a0f1e 70%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24 } },
+    h("div", { style: { marginBottom: 40, textAlign: "center" } },
+      h("div", { style: { width: 88, height: 88, borderRadius: "50%", background: "linear-gradient(135deg,#1e6fff,#00b4ff)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", boxShadow: "0 0 60px rgba(30,111,255,0.4)" } }, h(Icon, { name: "shield", size: 44, color: "#fff" })),
+      h("div", { style: { color: "#fff", fontWeight: 900, fontSize: 32, letterSpacing: 10 } }, "A.H.S"),
+      h("div", { style: { color: "#1e6fff", fontSize: 11, letterSpacing: 5, marginTop: 6 } }, "RONDAS COM QR CODE")
+    ),
+    h("div", { style: { width: "100%", maxWidth: 360 } },
+      h("div", { style: { marginBottom: 16 } },
+        h("div", { style: { color: C.muted, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 } }, "Usuário"),
+        h("input", { value: un, onChange: e => { setUn(e.target.value); setErr(""); }, onKeyDown: e => e.key === "Enter" && login(), placeholder: "Seu usuário", autoCapitalize: "none", autoCorrect: "off", spellCheck: false, style: { width: "100%", background: C.card, border: "1px solid " + C.border, borderRadius: 12, padding: "14px 16px", color: "#fff", fontSize: 15, outline: "none", boxSizing: "border-box" } })
+      ),
+      h("div", { style: { marginBottom: 24, position: "relative" } },
+        h("div", { style: { color: C.muted, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 } }, "Senha"),
+        h("input", { type: show ? "text" : "password", value: pw, onChange: e => { setPw(e.target.value); setErr(""); }, onKeyDown: e => e.key === "Enter" && login(), placeholder: "Sua senha", style: { width: "100%", background: C.card, border: "1px solid " + C.border, borderRadius: 12, padding: "14px 48px 14px 16px", color: "#fff", fontSize: 15, outline: "none", boxSizing: "border-box" } }),
+        h("button", { onClick: () => setShow(v => !v), style: { position: "absolute", right: 14, top: 38, background: "none", border: "none", cursor: "pointer", color: C.muted } }, h(Icon, { name: show ? "eyeoff" : "eye", size: 18 }))
+      ),
+      err && h("div", { style: { display: "flex", alignItems: "center", gap: 8, color: "#ff3d71", fontSize: 13, marginBottom: 16 } }, h(Icon, { name: "alert", size: 15 }), err),
+      h("button", { onClick: login, style: { width: "100%", background: "linear-gradient(135deg,#1e6fff,#00b4ff)", border: "none", borderRadius: 14, padding: 16, color: "#fff", fontWeight: 900, fontSize: 16, cursor: "pointer", boxShadow: "0 4px 24px rgba(30,111,255,0.4)" } }, "ENTRAR")
+    ),
+    h("div", { style: { color: "#1e293b", fontSize: 11, marginTop: 48 } }, "A.H.S Security System • v2.0")
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// ADMIN
+// ═══════════════════════════════════════════════════════════
+function Admin({ currentUser, users, allUsers, myTenant, points, routes, records, onLogout }) {
+  const [tab, setTab] = useState("dash");
+  const tabs = [
+    { id: "dash", icon: "barchart", label: "Painel" },
+    { id: "users", icon: "users", label: "Usuários" },
+    { id: "points", icon: "mappin", label: "Pontos" },
+    { id: "routes", icon: "qrcode", label: "Rondas" },
+    { id: "reports", icon: "filetext", label: "Relatórios" },
+  ];
+  return h("div", { style: { minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column" } },
+    h(Header, { title: "Painel Administrativo", sub: currentUser.name, onLogout }),
+    h("div", { style: { flex: 1, overflowY: "auto", paddingBottom: 8 } },
+      tab === "dash" && h(ADash, { records, users }),
+      tab === "users" && h(AUsers, { users, allUsers, myTenant }),
+      tab === "points" && h(APoints, { points, myTenant }),
+      tab === "routes" && h(ARoutes, { routes, points, myTenant }),
+      tab === "reports" && h(AReports, { records })
+    ),
+    h(BottomNav, { tabs, active: tab, onChange: setTab })
+  );
+}
+
+function Header({ title, sub, onLogout }) {
+  return h("div", { style: { background: C.card, borderBottom: "1px solid " + C.border, padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 } },
+    h("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+      h("div", { style: { width: 34, height: 34, borderRadius: 8, background: "linear-gradient(135deg,#1e6fff,#00b4ff)", display: "flex", alignItems: "center", justifyContent: "center" } }, h(Icon, { name: "shield", size: 17, color: "#fff" })),
+      h("div", null, h("div", { style: { color: "#fff", fontWeight: 800, fontSize: 13, letterSpacing: 1 } }, "A.H.S"), h("div", { style: { color: "#1e6fff", fontSize: 10, letterSpacing: 1 } }, title))
+    ),
+    h("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
+      h("span", { style: { color: C.muted, fontSize: 12 } }, sub),
+      h("button", { onClick: onLogout, style: { background: "none", border: "none", cursor: "pointer", color: C.muted } }, h(Icon, { name: "logout", size: 18 }))
+    )
+  );
+}
+
+function BottomNav({ tabs, active, onChange }) {
+  return h("div", { style: { background: C.card, borderTop: "1px solid " + C.border, display: "flex", flexShrink: 0 } },
+    tabs.map(t => h("button", { key: t.id, onClick: () => onChange(t.id), style: { flex: 1, padding: "10px 0", display: "flex", flexDirection: "column", alignItems: "center", gap: 3, background: "none", border: "none", cursor: "pointer", color: active === t.id ? "#1e6fff" : C.muted } },
+      h(Icon, { name: t.icon, size: 20 }), h("span", { style: { fontSize: 10 } }, t.label)
+    ))
+  );
+}
+
+function ADash({ records, users }) {
+  const today = new Date().toISOString().split("T")[0];
+  const tod = records.filter(r => r.startTime && r.startTime.startsWith(today));
+  const stats = [
+    { l: "Rondas Hoje", v: tod.length, c: "#1e6fff" },
+    { l: "Concluídas", v: tod.filter(r => r.status === "completed").length, c: "#00d68f" },
+    { l: "Em Andamento", v: tod.filter(r => r.status === "in_progress").length, c: "#ffb300" },
+    { l: "Colaboradores", v: users.filter(u => u.role !== "admin" && u.active).length, c: "#a78bfa" },
+  ];
+  return h("div", { style: { padding: 16 } },
+    h("div", { style: { color: "#fff", fontWeight: 800, fontSize: 20, marginBottom: 16 } }, "Dashboard"),
+    h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 } },
+      stats.map((s, i) => h(Card, { key: i, style: { padding: 16 } }, h("div", { style: { color: C.muted, fontSize: 11, marginBottom: 6, letterSpacing: 1 } }, s.l), h("div", { style: { color: s.c, fontSize: 34, fontWeight: 900 } }, s.v)))
+    ),
+    h("div", { style: { color: C.muted, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 } }, "Atividade Recente"),
+    records.length === 0
+      ? h(Card, { style: { padding: 32, textAlign: "center" } }, h("div", { style: { color: C.muted, fontSize: 13 } }, "Nenhuma ronda registrada ainda"))
+      : h("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+          records.slice().sort((a, b) => new Date(b.startTime) - new Date(a.startTime)).slice(0, 6).map(r => h(Card, { key: r.id, style: { padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 } },
+            h("div", { style: { width: 8, height: 8, borderRadius: "50%", background: ST[r.status] ? ST[r.status].c : "#666", flexShrink: 0 } }),
+            h("div", { style: { flex: 1, minWidth: 0 } },
+              h("div", { style: { color: "#fff", fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, r.routeName),
+              h("div", { style: { color: C.muted, fontSize: 11 } }, r.userName + " • " + fmt.time(r.startTime))
+            ),
+            h("div", { style: { background: ST[r.status] ? ST[r.status].bg : "#333", color: ST[r.status] ? ST[r.status].c : "#fff", fontSize: 10, padding: "3px 8px", borderRadius: 20, flexShrink: 0, fontWeight: 700 } }, ST[r.status] ? ST[r.status].label : r.status)
+          ))
+        )
+  );
+}
+
+function AUsers({ users, allUsers, myTenant }) {
+  const [modal, setModal] = useState(null);
+  const [form, setForm] = useState({ name: "", username: "", password: "", role: "collaborator" });
+  const [err, setErr] = useState("");
+  const [okMsg, setOkMsg] = useState("");
+  const open = (u) => { setForm(u ? { name: u.name, username: u.username, password: u.password, role: u.role } : { name: "", username: "", password: "", role: "collaborator" }); setModal(u || "new"); setErr(""); setOkMsg(""); };
+  const save = async () => {
+    if (!form.name.trim() || !form.username.trim() || !form.password.trim()) { setErr("Preencha todos os campos"); return; }
+    const uname = form.username.trim().toLowerCase();
+    const dupList = allUsers || users;
+    if (dupList.find(u => (u.username || "").trim().toLowerCase() === uname && (modal === "new" || u.id !== modal.id))) { setErr("Usuário já existe"); return; }
+    if (modal === "new") {
+      const newId = genId();
+      // Admin novo = tenant próprio (painel separado). Colaborador herda o tenant atual.
+      const tenantId = form.role === "admin" ? newId : myTenant;
+      await setItem("users", newId, { ...form, username: uname, tenantId, active: true, createdAt: new Date().toISOString() });
+      if (form.role === "admin") setOkMsg("Administrador criado! Ele tera um painel proprio e separado (proprios colaboradores, pontos e rondas) e, por isso, nao aparece nesta lista.");
+    } else {
+      await updateItem("users", modal.id, { name: form.name, username: uname, password: form.password, role: form.role });
+    }
+    setModal(null);
+  };
+  const del = async (id) => { if (!confirm("Excluir colaborador?")) return; await removeItem("users", id); };
+  const toggle = async (u) => { await updateItem("users", u.id, { active: !u.active }); };
+  return h("div", { style: { padding: 16 } },
+    h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 } },
+      h("div", { style: { color: "#fff", fontWeight: 800, fontSize: 20 } }, "Colaboradores"),
+      h(Btn, { onClick: () => open(null), style: { padding: "8px 14px", fontSize: 13, display: "flex", alignItems: "center", gap: 6 } }, h(Icon, { name: "plus", size: 15 }), "Novo")
+    ),
+    okMsg && h("div", { style: { background: "rgba(0,214,143,0.08)", border: "1px solid rgba(0,214,143,0.3)", borderRadius: 12, padding: "10px 14px", color: "#6ee7b7", fontSize: 12, marginBottom: 12, display: "flex", alignItems: "flex-start", gap: 8 } }, h(Icon, { name: "checkcircle", size: 16, color: "#00d68f", style: { flexShrink: 0, marginTop: 1 } }), h("div", { style: { flex: 1 } }, okMsg), h("button", { onClick: () => setOkMsg(""), style: { background: "none", border: "none", color: "#6ee7b7", cursor: "pointer", flexShrink: 0 } }, h(Icon, { name: "x", size: 14 }))),
+    h("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+      users.map(u => h(Card, { key: u.id, style: { padding: "12px 14px", display: "flex", alignItems: "center", gap: 12 } },
+        h("div", { style: { width: 40, height: 40, borderRadius: "50%", background: u.role === "admin" ? "#4c1d95" : "#1e3a8a", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontWeight: 900, fontSize: 15, flexShrink: 0 } }, u.name.charAt(0).toUpperCase()),
+        h("div", { style: { flex: 1, minWidth: 0 } },
+          h("div", { style: { color: "#fff", fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, u.name),
+          h("div", { style: { color: C.muted, fontSize: 11 } }, "@" + u.username + " • " + (u.role === "admin" ? "Admin" : "Colaborador"))
+        ),
+        h("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
+          h("button", { onClick: () => toggle(u), style: { width: 10, height: 10, borderRadius: "50%", background: u.active ? "#00d68f" : "#475569", border: "none", cursor: "pointer", flexShrink: 0 } }),
+          h("button", { onClick: () => open(u), style: { background: "none", border: "none", cursor: "pointer", color: C.muted } }, h(Icon, { name: "edit", size: 15 })),
+          u.id !== "admin-seed" && h("button", { onClick: () => del(u.id), style: { background: "none", border: "none", cursor: "pointer", color: C.muted } }, h(Icon, { name: "trash", size: 15 }))
+        )
+      ))
+    ),
+    modal && h(BottomModal, { title: modal === "new" ? "Novo Colaborador" : "Editar Colaborador", onClose: () => setModal(null) },
+      h("div", { style: { display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 } },
+        [["name", "Nome completo", "text"], ["username", "Usuário (login)", "text"], ["password", "Senha", "password"]].map(([f, ph, t]) =>
+          h("input", { key: f, type: t, placeholder: ph, value: form[f], onChange: e => setForm(p => ({ ...p, [f]: f === "username" ? e.target.value.toLowerCase() : e.target.value })), autoCapitalize: f === "username" ? "none" : undefined, autoCorrect: f === "username" ? "off" : undefined, spellCheck: f === "username" ? false : undefined, style: { background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" } })
+        ),
+        h("select", { value: form.role, onChange: e => setForm(p => ({ ...p, role: e.target.value })), style: { background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" } },
+          h("option", { value: "collaborator" }, "Colaborador"), h("option", { value: "admin" }, "Administrador")
+        ),
+        modal === "new" && form.role === "admin" && h("div", { style: { color: "#fbbf24", fontSize: 11, lineHeight: 1.4 } }, "Este administrador tera um painel proprio e separado (proprios colaboradores, pontos e rondas). Voce nao vera os dados dele depois.")
+      ),
+      err && h("div", { style: { color: "#ff3d71", fontSize: 12, marginBottom: 10 } }, err),
+      h("div", { style: { display: "flex", gap: 10 } }, h(Btn, { onClick: () => setModal(null), color: "#1e293b", style: { flex: 1 } }, "Cancelar"), h(Btn, { onClick: save, style: { flex: 1 } }, "Salvar"))
+    )
+  );
+}
+
+function APoints({ points, myTenant }) {
+  const [modal, setModal] = useState(false);
+  const [form, setForm] = useState({ name: "", description: "", location: "" });
+  const [qr, setQr] = useState(null);
+  const [printList, setPrintList] = useState([]);
+  const save = async () => {
+    if (!form.name.trim()) return;
+    await setItem("points", genId(), { ...form, tenantId: myTenant, createdAt: new Date().toISOString() });
+    setModal(false); setForm({ name: "", description: "", location: "" });
+  };
+  const del = async (id) => { if (!confirm("Excluir ponto?")) return; await removeItem("points", id); };
+  const doPrint = (list) => { setPrintList(list); setTimeout(() => window.print(), 300); };
+  return h("div", { style: { padding: 16 } },
+    h("style", null, "@media print { body * { visibility: hidden; } .ahs-print-area, .ahs-print-area * { visibility: visible; } .ahs-print-area { position: absolute !important; top: 0; left: 0; width: 100%; } }"),
+    h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16, gap: 8 } },
+      h("div", { style: { color: "#fff", fontWeight: 800, fontSize: 20 } }, "Pontos de Ronda"),
+      h("div", { style: { display: "flex", gap: 8 } },
+        points.length > 0 && h(Btn, { onClick: () => doPrint(points), color: "#1e293b", style: { padding: "8px 12px", fontSize: 13, display: "flex", alignItems: "center", gap: 6 } }, h(Icon, { name: "printer", size: 15 }), "Imprimir tudo"),
+        h(Btn, { onClick: () => setModal(true), style: { padding: "8px 14px", fontSize: 13, display: "flex", alignItems: "center", gap: 6 } }, h(Icon, { name: "plus", size: 15 }), "Novo")
+      )
+    ),
+    points.length === 0 && h(Card, { style: { padding: 40, textAlign: "center" } }, h(Icon, { name: "mappin", size: 36, color: C.border, style: { margin: "0 auto 10px" } }), h("div", { style: { color: C.muted, fontSize: 13 } }, "Nenhum ponto cadastrado")),
+    h("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+      points.map(p => h(Card, { key: p.id, style: { padding: "12px 14px", display: "flex", alignItems: "center", gap: 12 } },
+        h("div", { style: { width: 40, height: 40, borderRadius: 10, background: "#0c2a4a", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, h(Icon, { name: "mappin", size: 18, color: "#38bdf8" })),
+        h("div", { style: { flex: 1, minWidth: 0 } },
+          h("div", { style: { color: "#fff", fontWeight: 600, fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, p.name),
+          p.location && h("div", { style: { color: C.muted, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, p.location)
+        ),
+        h("div", { style: { display: "flex", gap: 12 } },
+          h("button", { onClick: () => setQr(p), style: { background: "none", border: "none", cursor: "pointer", color: C.muted } }, h(Icon, { name: "qrcode", size: 18 })),
+          h("button", { onClick: () => doPrint([p]), style: { background: "none", border: "none", cursor: "pointer", color: C.muted } }, h(Icon, { name: "printer", size: 16 })),
+          h("button", { onClick: () => del(p.id), style: { background: "none", border: "none", cursor: "pointer", color: C.muted } }, h(Icon, { name: "trash", size: 15 }))
+        )
+      ))
+    ),
+    modal && h(BottomModal, { title: "Novo Ponto", onClose: () => setModal(false) },
+      h("div", { style: { display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 } },
+        [["name", "Nome do ponto (ex: Portaria Principal)"], ["description", "Descrição"], ["location", "Localização"]].map(([f, ph]) =>
+          h("input", { key: f, placeholder: ph, value: form[f], onChange: e => setForm(p => ({ ...p, [f]: e.target.value })), style: { background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" } })
+        )
+      ),
+      h("div", { style: { display: "flex", gap: 10 } }, h(Btn, { onClick: () => setModal(false), color: "#1e293b", style: { flex: 1 } }, "Cancelar"), h(Btn, { onClick: save, style: { flex: 1 } }, "Salvar"))
+    ),
+    qr && h("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 99, padding: 24 }, onClick: () => setQr(null) },
+      h(Card, { style: { padding: 24, maxWidth: 300, width: "100%", textAlign: "center" }, onClick: e => e.stopPropagation() },
+        h("div", { style: { color: "#fff", fontWeight: 700, fontSize: 16, marginBottom: 4 } }, qr.name),
+        qr.location && h("div", { style: { color: C.muted, fontSize: 12, marginBottom: 16 } }, qr.location),
+        h("div", { style: { background: "#fff", borderRadius: 12, padding: 12, display: "inline-block", marginBottom: 12 } }, h(QRImage, { data: "AHS_POINT_" + qr.id, size: 180 })),
+        h("div", { style: { color: "#334155", fontSize: 9, wordBreak: "break-all", marginBottom: 16 } }, "AHS_POINT_" + qr.id),
+        h("div", { style: { display: "flex", gap: 10 } },
+          h(Btn, { onClick: () => doPrint([qr]), color: "#1e293b", style: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 } }, h(Icon, { name: "printer", size: 15 }), "Imprimir"),
+          h(Btn, { onClick: () => setQr(null), style: { flex: 1 } }, "Fechar")
+        )
+      )
+    ),
+    h("div", { className: "ahs-print-area", style: { position: "fixed", top: 0, left: -99999, width: 760, background: "#fff", padding: 24 } },
+      h("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 20, borderBottom: "2px solid #111", paddingBottom: 12 } },
+        h("div", { style: { fontWeight: 900, fontSize: 20, color: "#111" } }, "A.H.S"),
+        h("div", { style: { color: "#555", fontSize: 13 } }, "Pontos de Ronda — QR Codes para fixar no local")
+      ),
+      h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 } },
+        printList.map(p => h("div", { key: p.id, style: { border: "2px dashed #999", borderRadius: 10, padding: 16, textAlign: "center", breakInside: "avoid" } },
+          h("div", { style: { fontWeight: 800, fontSize: 16, color: "#111", marginBottom: 2 } }, p.name),
+          p.location && h("div", { style: { color: "#555", fontSize: 12, marginBottom: 8 } }, p.location),
+          h("img", { src: "https://api.qrserver.com/v1/create-qr-code/?size=260x260&data=AHS_POINT_" + p.id, alt: "QR", style: { width: 220, height: 220 } }),
+          h("div", { style: { color: "#999", fontSize: 9, marginTop: 6, wordBreak: "break-all" } }, "AHS_POINT_" + p.id)
+        ))
+      )
+    )
+  );
+}
+
+function ARoutes({ routes, points, myTenant }) {
+  const [modal, setModal] = useState(false);
+  const [form, setForm] = useState({ name: "", description: "", pointIds: [] });
+  const tog = (id) => setForm(f => ({ ...f, pointIds: f.pointIds.includes(id) ? f.pointIds.filter(p => p !== id) : [...f.pointIds, id] }));
+  const save = async () => {
+    if (!form.name.trim() || !form.pointIds.length) return;
+    await setItem("routes", genId(), { ...form, tenantId: myTenant, createdAt: new Date().toISOString() });
+    setModal(false); setForm({ name: "", description: "", pointIds: [] });
+  };
+  const del = async (id) => { if (!confirm("Excluir ronda?")) return; await removeItem("routes", id); };
+  return h("div", { style: { padding: 16 } },
+    h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 } },
+      h("div", { style: { color: "#fff", fontWeight: 800, fontSize: 20 } }, "Rondas"),
+      h(Btn, { onClick: () => setModal(true), style: { padding: "8px 14px", fontSize: 13, display: "flex", alignItems: "center", gap: 6 } }, h(Icon, { name: "plus", size: 15 }), "Nova")
+    ),
+    routes.length === 0 && h(Card, { style: { padding: 40, textAlign: "center" } }, h(Icon, { name: "qrcode", size: 36, color: C.border, style: { margin: "0 auto 10px" } }), h("div", { style: { color: C.muted } }, "Nenhuma ronda cadastrada")),
+    h("div", { style: { display: "flex", flexDirection: "column", gap: 8 } },
+      routes.map(r => h(Card, { key: r.id, style: { padding: 14 } },
+        h("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
+          h("div", { style: { width: 40, height: 40, borderRadius: 10, background: "#052e16", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, h(Icon, { name: "qrcode", size: 18, color: "#4ade80" })),
+          h("div", { style: { flex: 1 } }, h("div", { style: { color: "#fff", fontWeight: 600 } }, r.name), h("div", { style: { color: C.muted, fontSize: 11 } }, r.pointIds.length + " ponto" + (r.pointIds.length !== 1 ? "s" : ""))),
+          h("button", { onClick: () => del(r.id), style: { background: "none", border: "none", cursor: "pointer", color: C.muted } }, h(Icon, { name: "trash", size: 15 }))
+        ),
+        r.pointIds.length > 0 && h("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, marginTop: 10 } },
+          r.pointIds.map(pid => { const pt = points.find(p => p.id === pid); return pt ? h("span", { key: pid, style: { background: C.bg, color: "#94a3b8", fontSize: 10, padding: "3px 8px", borderRadius: 20 } }, pt.name) : null; })
+        )
+      ))
+    ),
+    modal && h(BottomModal, { title: "Nova Ronda", onClose: () => setModal(false) },
+      h("div", { style: { display: "flex", flexDirection: "column", gap: 10, marginBottom: 12 } },
+        h("input", { placeholder: "Nome da ronda", value: form.name, onChange: e => setForm(p => ({ ...p, name: e.target.value })), style: { background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" } }),
+        h("input", { placeholder: "Descrição (opcional)", value: form.description, onChange: e => setForm(p => ({ ...p, description: e.target.value })), style: { background: C.bg, border: "1px solid " + C.border, borderRadius: 10, padding: "12px 14px", color: "#fff", fontSize: 14, outline: "none" } })
+      ),
+      h("div", { style: { color: C.muted, fontSize: 12, marginBottom: 8 } }, "Selecione os pontos:"),
+      points.length === 0
+        ? h("div", { style: { color: "#475569", fontSize: 12, marginBottom: 12 } }, "Cadastre pontos primeiro")
+        : h("div", { style: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 } },
+            points.map(pt => {
+              const sel = form.pointIds.includes(pt.id);
+              return h("button", { key: pt.id, onClick: () => tog(pt.id), style: { background: sel ? "rgba(30,111,255,0.1)" : C.bg, border: "1px solid " + (sel ? "#1e6fff" : C.border), borderRadius: 10, padding: "10px 12px", display: "flex", alignItems: "center", gap: 10, cursor: "pointer" } },
+                h("div", { style: { width: 18, height: 18, borderRadius: 4, background: sel ? "#1e6fff" : "#1e293b", border: "1px solid " + (sel ? "#1e6fff" : "#334155"), display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, sel && h(Icon, { name: "check", size: 11, color: "#fff" })),
+                h("span", { style: { color: "#fff", fontSize: 13 } }, pt.name)
+              );
+            })
+          ),
+      h("div", { style: { display: "flex", gap: 10 } }, h(Btn, { onClick: () => setModal(false), color: "#1e293b", style: { flex: 1 } }, "Cancelar"), h(Btn, { onClick: save, style: { flex: 1 } }, "Salvar"))
+    )
+  );
+}
+
+function AReports({ records }) {
+  const [detail, setDetail] = useState(null);
+  const [photoView, setPhotoView] = useState(null);
+  const del = async (id) => { if (!confirm("Excluir este relatório de ronda? Esta ação não pode ser desfeita.")) return; await removeItem("records", id); setDetail(null); };
+  if (detail) return h("div", { style: { padding: 16 } },
+    h("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 } },
+      h("button", { onClick: () => setDetail(null), style: { display: "flex", alignItems: "center", gap: 8, color: C.muted, background: "none", border: "none", cursor: "pointer", fontSize: 13 } }, h(Icon, { name: "arrowleft", size: 17 }), "Voltar"),
+      h("button", { onClick: () => del(detail.id), style: { display: "flex", alignItems: "center", gap: 6, color: "#ff3d71", background: "rgba(255,61,113,0.1)", border: "1px solid rgba(255,61,113,0.3)", borderRadius: 10, padding: "6px 12px", cursor: "pointer", fontSize: 12, fontWeight: 700 } }, h(Icon, { name: "trash", size: 14 }), "Excluir")
+    ),
+    h(Card, { style: { padding: 16, marginBottom: 12 } },
+      h("div", { style: { color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase" } }, "Ronda"),
+      h("div", { style: { color: "#fff", fontWeight: 800, fontSize: 18, marginTop: 2 } }, detail.routeName),
+      h("div", { style: { color: "#94a3b8", fontSize: 13, marginTop: 2 } }, detail.userName),
+      h("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 } },
+        h("div", null, h("div", { style: { color: "#475569", fontSize: 10 } }, "INÍCIO"), h("div", { style: { color: "#fff", fontSize: 12, marginTop: 2 } }, fmt.dt(detail.startTime))),
+        h("div", null, h("div", { style: { color: "#475569", fontSize: 10 } }, "DURAÇÃO"), h("div", { style: { color: "#fff", fontSize: 12, marginTop: 2 } }, fmt.dur(detail.startTime, detail.endTime)))
+      ),
+      h("div", { style: { marginTop: 12 } }, h("span", { style: { background: ST[detail.status] ? ST[detail.status].bg : "#333", color: ST[detail.status] ? ST[detail.status].c : "#fff", fontSize: 11, padding: "4px 10px", borderRadius: 20, fontWeight: 700 } }, ST[detail.status] ? ST[detail.status].label : detail.status)),
+      detail.startLat != null && h("a", { href: "https://www.google.com/maps?q=" + detail.startLat + "," + detail.startLng, target: "_blank", rel: "noopener", style: { display: "inline-flex", alignItems: "center", gap: 6, color: "#60a5fa", fontSize: 12, marginTop: 10, textDecoration: "none" } }, h(Icon, { name: "mappin", size: 13, color: "#60a5fa" }), "Local de início da ronda")
+    ),
+    h("div", { style: { color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 } }, "Pontos Escaneados (" + (detail.scans || []).length + "/" + detail.totalPoints + ")"),
+    h("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+      (detail.scans || []).map((s, i) => h(Card, { key: i, style: { padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, background: "rgba(0,214,143,0.06)", border: "1px solid rgba(0,214,143,0.2)" } },
+        s.photo
+          ? h("img", { src: s.photo, alt: "Local", onClick: () => setPhotoView(s.photo), style: { width: 44, height: 44, borderRadius: 8, objectFit: "cover", cursor: "pointer", flexShrink: 0 } })
+          : h(Icon, { name: "checkcircle", size: 16, color: "#00d68f" }),
+        h("div", { style: { flex: 1 } },
+          h("div", { style: { color: "#fff", fontSize: 13, fontWeight: 600 } }, s.pointName),
+          h("div", { style: { color: "#00d68f", fontSize: 11 } }, fmt.time(s.scannedAt))
+        ),
+        s.lat != null
+          ? h("a", { href: "https://www.google.com/maps?q=" + s.lat + "," + s.lng, target: "_blank", rel: "noopener", style: { color: "#60a5fa", display: "flex", alignItems: "center", gap: 4, fontSize: 11, textDecoration: "none" } }, h(Icon, { name: "mappin", size: 14, color: "#60a5fa" }), "Mapa")
+          : h("span", { style: { color: "#475569", fontSize: 10 } }, "sem GPS")
+      )),
+      !(detail.scans || []).length && h("div", { style: { color: C.muted, fontSize: 13, textAlign: "center", padding: 20 } }, "Nenhum ponto escaneado")
+    ),
+    photoView && h("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 99, padding: 16 }, onClick: () => setPhotoView(null) },
+      h("img", { src: photoView, alt: "Foto do local", style: { maxWidth: "100%", maxHeight: "100%", borderRadius: 12 } }),
+      h("button", { onClick: () => setPhotoView(null), style: { position: "absolute", top: 16, right: 16, background: "rgba(0,0,0,0.6)", border: "none", borderRadius: "50%", width: 40, height: 40, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff" } }, h(Icon, { name: "x", size: 20 }))
+    )
+  );
+  return h("div", { style: { padding: 16 } },
+    h("div", { style: { color: "#fff", fontWeight: 800, fontSize: 20, marginBottom: 16 } }, "Relatórios"),
+    records.length === 0
+      ? h(Card, { style: { padding: 40, textAlign: "center" } }, h(Icon, { name: "filetext", size: 36, color: C.border, style: { margin: "0 auto 10px" } }), h("div", { style: { color: C.muted } }, "Nenhuma ronda registrada"))
+      : h("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+          records.slice().sort((a, b) => new Date(b.startTime) - new Date(a.startTime)).map(r => h("div", { key: r.id, style: { background: C.card, border: "1px solid " + C.border, borderRadius: 12, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10 } },
+            h("button", { onClick: () => setDetail(r), style: { display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, background: "none", border: "none", cursor: "pointer", textAlign: "left", padding: 0 } },
+              h("div", { style: { width: 8, height: 8, borderRadius: "50%", background: ST[r.status] ? ST[r.status].c : "#666", flexShrink: 0 } }),
+              h("div", { style: { flex: 1, minWidth: 0 } },
+                h("div", { style: { color: "#fff", fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, r.routeName),
+                h("div", { style: { color: C.muted, fontSize: 11 } }, r.userName + " • " + fmt.dt(r.startTime))
+              ),
+              h(Icon, { name: "chevronright", size: 15, color: C.muted })
+            ),
+            h("button", { onClick: () => del(r.id), style: { background: "none", border: "none", cursor: "pointer", color: C.muted, flexShrink: 0, padding: 4 } }, h(Icon, { name: "trash", size: 15 }))
+          ))
+        )
+  );
+}
+
+function BottomModal({ title, children, onClose }) {
+  return h("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 99 } },
+    h("div", { style: { background: C.card, borderRadius: "24px 24px 0 0", width: "100%", maxWidth: 500, maxHeight: "90vh", overflowY: "auto", padding: 24, paddingBottom: 32 } },
+      h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 } },
+        h("div", { style: { color: "#fff", fontWeight: 800, fontSize: 16 } }, title),
+        h("button", { onClick: onClose, style: { background: "none", border: "none", cursor: "pointer", color: C.muted } }, h(Icon, { name: "x", size: 20 }))
+      ),
+      children
+    )
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// PATROL (COLABORADOR)
+// ═══════════════════════════════════════════════════════════
+function Patrol({ currentUser, myTenant, routes, points, records, onLogout }) {
+  const [tab, setTab] = useState("home");
+  const [patrol, setPatrol] = useState(null);
+  const myRec = records.filter(r => r.userId === currentUser.id);
+  const tabs = [{ id: "home", icon: "home", label: "Início" }, { id: "scan", icon: "camera", label: "Escanear" }, { id: "history", icon: "clock", label: "Histórico" }];
+  return h("div", { style: { minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column" } },
+    h(Header, { title: "Olá, " + currentUser.name.split(" ")[0], sub: "", onLogout }),
+    h("div", { style: { flex: 1, overflowY: "auto", paddingBottom: 8 } },
+      tab === "home" && h(PHome, { currentUser, myTenant, routes, records: myRec, patrol, setPatrol, setTab }),
+      tab === "scan" && h(PScanner, { patrol, setPatrol, points, currentUser, setTab }),
+      tab === "history" && h(PHistory, { records: myRec })
+    ),
+    h(BottomNav, { tabs, active: tab, onChange: setTab })
+  );
+}
+
+function PHome({ currentUser, myTenant, routes, records, patrol, setPatrol, setTab }) {
+  const start = async (route) => {
+    if (patrol) return;
+    const id = genId();
+    const loc = await getLocation();
+    const rec = { id, tenantId: myTenant, routeId: route.id, routeName: route.name, userId: currentUser.id, userName: currentUser.name, startTime: new Date().toISOString(), endTime: null, status: "in_progress", scans: [], totalPoints: route.pointIds.length, startLat: loc ? loc.lat : null, startLng: loc ? loc.lng : null };
+    await setItem("records", id, rec);
+    setPatrol({ ...rec, route });
+    setTab("scan");
+  };
+  const today = new Date().toDateString();
+  const todayRec = records.filter(r => new Date(r.startTime).toDateString() === today);
+  return h("div", { style: { padding: 16 } },
+    patrol
+      ? h("div", { style: { background: "rgba(255,179,0,0.08)", border: "1px solid rgba(255,179,0,0.3)", borderRadius: 16, padding: 16, marginBottom: 20 } },
+          h("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start" } },
+            h("div", null,
+              h("div", { style: { color: "#ffb300", fontSize: 10, letterSpacing: 2, fontWeight: 700, textTransform: "uppercase" } }, "Em Andamento"),
+              h("div", { style: { color: "#fff", fontWeight: 800, fontSize: 18, marginTop: 4 } }, patrol.routeName),
+              h("div", { style: { color: "#fbbf24", fontSize: 13, marginTop: 2 } }, (patrol.scans || []).length + " / " + patrol.totalPoints + " pontos")
+            ),
+            h("div", { style: { width: 10, height: 10, borderRadius: "50%", background: "#ffb300", boxShadow: "0 0 10px #ffb300", marginTop: 4 } })
+          ),
+          h("button", { onClick: () => setTab("scan"), style: { marginTop: 14, background: "#92400e", border: "none", borderRadius: 10, padding: "10px 20px", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer", width: "100%" } }, "Continuar Ronda →")
+        )
+      : h(Card, { style: { padding: 16, display: "flex", alignItems: "center", gap: 14, marginBottom: 20 } },
+          h("div", { style: { width: 48, height: 48, borderRadius: "50%", background: "rgba(0,214,143,0.1)", border: "1px solid rgba(0,214,143,0.3)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, h(Icon, { name: "checkcircle", size: 24, color: "#00d68f" })),
+          h("div", null, h("div", { style: { color: "#fff", fontWeight: 700 } }, "Pronto para rondar"), h("div", { style: { color: C.muted, fontSize: 12 } }, "Selecione uma ronda abaixo"))
+        ),
+    h("div", { style: { color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 } }, "Rondas Disponíveis"),
+    routes.length === 0
+      ? h(Card, { style: { padding: 32, textAlign: "center" } }, h("div", { style: { color: C.muted, fontSize: 13 } }, "Nenhuma ronda disponível"))
+      : h("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 } },
+          routes.map(r => h(Card, { key: r.id, style: { padding: 14, display: "flex", alignItems: "center", gap: 12 } },
+            h("div", { style: { width: 40, height: 40, borderRadius: 10, background: "#0c2a4a", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, h(Icon, { name: "qrcode", size: 18, color: "#38bdf8" })),
+            h("div", { style: { flex: 1 } }, h("div", { style: { color: "#fff", fontWeight: 700 } }, r.name), h("div", { style: { color: C.muted, fontSize: 11 } }, r.pointIds.length + " ponto" + (r.pointIds.length !== 1 ? "s" : ""))),
+            h(Btn, { onClick: () => start(r), disabled: !!patrol, style: { padding: "8px 16px", fontSize: 12 } }, "Iniciar")
+          ))
+        ),
+    todayRec.length > 0 && h(React.Fragment, null,
+      h("div", { style: { color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 } }, "Hoje"),
+      h("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+        todayRec.slice().sort((a, b) => new Date(b.startTime) - new Date(a.startTime)).map(r => h(Card, { key: r.id, style: { padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 } },
+          h("div", { style: { width: 7, height: 7, borderRadius: "50%", background: ST[r.status] ? ST[r.status].c : "#666", flexShrink: 0 } }),
+          h("div", { style: { flex: 1, minWidth: 0 } }, h("div", { style: { color: "#fff", fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, r.routeName), h("div", { style: { color: C.muted, fontSize: 11 } }, fmt.time(r.startTime) + " • " + (r.scans || []).length + "/" + r.totalPoints + " pts"))
+        ))
+      )
+    )
+  );
+}
+
+function PScanner({ patrol, setPatrol, points, currentUser, setTab }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const coolRef = useRef(0);
+  const patrolRef = useRef(patrol);
+  const fileRef = useRef(null);
+  const [cam, setCam] = useState(false);
+  const [lastScan, setLastScan] = useState(null);
+  const [scanErr, setScanErr] = useState("");
+  const [manual, setManual] = useState("");
+  const [showM, setShowM] = useState(false);
+  const [pending, setPending] = useState(null);
+  const [photo, setPhoto] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { patrolRef.current = patrol; }, [patrol]);
+  useEffect(() => () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop()); }, []);
+
+  const processQR = async (code) => {
+    const p = patrolRef.current; if (!p) return;
+    setScanErr("");
+    if (pending) return;
+    if (!code.startsWith("AHS_POINT_")) { setScanErr("QR Code inválido"); return; }
+    const pid = code.replace("AHS_POINT_", "");
+    const scanned = (p.scans || []).map(s => s.pointId);
+    if (scanned.includes(pid)) { setScanErr("Ponto já registrado"); return; }
+    if (!(p.route && p.route.pointIds && p.route.pointIds.includes(pid))) { setScanErr("Ponto não pertence a esta ronda"); return; }
+    const pt = points.find(x => x.id === pid); if (!pt) { setScanErr("Ponto não encontrado"); return; }
+    // QR válido: pede a foto do local ANTES de registrar o ponto
+    stopCam();
+    setPhoto(null);
+    setPending({ pid: pid, pointName: pt.name });
+  };
+
+  const onPhoto = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setScanErr("");
+    try {
+      const data = await compressImage(file, 600, 0.45);
+      setPhoto(data);
+    } catch (err) { setScanErr("Não foi possível processar a foto. Tente novamente."); }
+  };
+
+  const confirmScan = async () => {
+    const p = patrolRef.current;
+    if (!p || !pending || !photo || busy) return;
+    setBusy(true);
+    const pid = pending.pid;
+    const scan = { pointId: pid, pointName: pending.pointName, scannedAt: new Date().toISOString(), lat: null, lng: null, photo: photo };
+    const newScans = [...(p.scans || []), scan];
+    patrolRef.current = { ...p, scans: newScans };
+    setPatrol(prev => ({ ...prev, scans: newScans }));
+    try {
+      await updateItem("records", p.id, { scans: newScans });
+      setLastScan(pending.pointName); setTimeout(() => setLastScan(null), 3000);
+      setPending(null); setPhoto(null);
+      // captura a localização em segundo plano, sem travar a confirmação
+      getLocation().then(function (loc) {
+        if (!loc) return;
+        const current = patrolRef.current; if (!current) return;
+        const withLoc = (current.scans || []).map(s => (s.pointId === pid && s.scannedAt === scan.scannedAt) ? { ...s, lat: loc.lat, lng: loc.lng } : s);
+        patrolRef.current = { ...current, scans: withLoc };
+        setPatrol(prev => prev ? { ...prev, scans: withLoc } : prev);
+        updateItem("records", p.id, { scans: withLoc }).catch(function () {});
+      });
+    } catch (err) {
+      // desfaz o registro local em caso de erro ao salvar
+      patrolRef.current = { ...p, scans: (p.scans || []) };
+      setPatrol(prev => ({ ...prev, scans: (p.scans || []) }));
+      setScanErr("Erro ao salvar o ponto. A foto pode estar muito grande — tente refazer a foto.");
+    }
+    setBusy(false);
+  };
+
+  const cancelPending = () => { setPending(null); setPhoto(null); setScanErr(""); };
+
+  const startCam = async () => {
+    setScanErr("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 } } });
+      streamRef.current = stream;
+      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
+      setCam(true);
+      if ("BarcodeDetector" in window) {
+        const det = new window.BarcodeDetector({ formats: ["qr_code"] });
+        const loop = async () => {
+          if (!streamRef.current) return;
+          const now = Date.now();
+          if (now - coolRef.current > 2000) {
+            try { const codes = await det.detect(videoRef.current); if (codes.length) { coolRef.current = now; await processQR(codes[0].rawValue); } } catch (e) {}
+          }
+          rafRef.current = requestAnimationFrame(loop);
+        };
+        rafRef.current = requestAnimationFrame(loop);
+      } else { setScanErr("Detecção automática indisponível neste navegador. Use o campo manual."); setShowM(true); }
+    } catch (e) { setScanErr("Câmera indisponível (" + (e.message || "erro") + "). Use o campo manual."); setShowM(true); }
+  };
+
+  const stopCam = () => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+    setCam(false);
+  };
+
+  const finish = async () => {
+    stopCam();
+    const p = patrolRef.current; if (!p) return;
+    const status = (p.scans || []).length >= p.totalPoints && p.totalPoints > 0 ? "completed" : "incomplete";
+    await updateItem("records", p.id, { scans: p.scans || [], status, endTime: new Date().toISOString() });
+    setPatrol(null); setTab("home");
+  };
+
+  if (!patrol) return h("div", { style: { padding: 16, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: 400 } },
+    h(Icon, { name: "alert", size: 40, color: "#ffb300", style: { marginBottom: 12 } }),
+    h("div", { style: { color: "#fff", fontWeight: 700, fontSize: 16, marginBottom: 4 } }, "Nenhuma ronda ativa"),
+    h("div", { style: { color: C.muted, fontSize: 13, marginBottom: 20 } }, "Inicie uma ronda na tela inicial"),
+    h(Btn, { onClick: () => setTab("home") }, "Ir para Início")
+  );
+
+  const scannedIds = (patrol.scans || []).map(s => s.pointId);
+  const rPts = ((patrol.route && patrol.route.pointIds) || []).map(id => points.find(p => p.id === id)).filter(Boolean);
+  const allDone = rPts.length > 0 && rPts.every(p => scannedIds.includes(p.id));
+
+  return h("div", { style: { padding: 16 } },
+    h(Card, { style: { padding: 14, marginBottom: 12 } },
+      h("div", { style: { color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase" } }, "Ronda Ativa"),
+      h("div", { style: { color: "#fff", fontWeight: 800, fontSize: 17, marginTop: 2 } }, patrol.routeName),
+      h("div", { style: { display: "flex", alignItems: "center", gap: 8, marginTop: 8 } },
+        h("div", { style: { flex: 1, background: C.bg, borderRadius: 4, height: 6, overflow: "hidden" } }, h("div", { style: { height: "100%", borderRadius: 4, background: allDone ? "#00d68f" : "#1e6fff", width: (rPts.length > 0 ? (scannedIds.length / rPts.length) * 100 : 0) + "%", transition: "width 0.4s" } })),
+        h("span", { style: { color: C.muted, fontSize: 11 } }, scannedIds.length + "/" + rPts.length)
+      )
+    ),
+    h("input", { ref: fileRef, type: "file", accept: "image/*", capture: "environment", onChange: onPhoto, style: { display: "none" } }),
+    pending && h(Card, { style: { overflow: "hidden", marginBottom: 12, padding: 16 } },
+      h("div", { style: { color: "#fff", fontWeight: 800, fontSize: 16, marginBottom: 2 } }, "Foto do local"),
+      h("div", { style: { color: "#94a3b8", fontSize: 13, marginBottom: 14 } }, "Ponto: " + pending.pointName),
+      !photo && h(React.Fragment, null,
+        h("div", { style: { border: "1px dashed " + C.border, borderRadius: 12, padding: 28, textAlign: "center", marginBottom: 14 } },
+          h(Icon, { name: "camera", size: 36, color: "#334155", style: { margin: "0 auto 10px" } }),
+          h("div", { style: { color: C.muted, fontSize: 12 } }, "Tire uma foto do local para confirmar o ponto")
+        ),
+        h("div", { style: { display: "flex", gap: 10 } },
+          h(Btn, { onClick: cancelPending, color: "#1e293b", style: { flex: 1 } }, "Cancelar"),
+          h(Btn, { onClick: () => fileRef.current && fileRef.current.click(), style: { flex: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 } }, h(Icon, { name: "camera", size: 16 }), "Tirar foto")
+        )
+      ),
+      photo && h(React.Fragment, null,
+        h("img", { src: photo, alt: "Foto do local", style: { width: "100%", borderRadius: 12, marginBottom: 14, display: "block", maxHeight: 320, objectFit: "cover" } }),
+        h("div", { style: { display: "flex", gap: 10 } },
+          h(Btn, { onClick: () => fileRef.current && fileRef.current.click(), color: "#1e293b", style: { flex: 1 } }, "Refazer"),
+          h(Btn, { onClick: confirmScan, disabled: busy, color: "#166534", style: { flex: 2, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 } }, h(Icon, { name: "check", size: 16 }), busy ? "Salvando..." : "Confirmar ponto")
+        )
+      )
+    ),
+    !pending && h(Card, { style: { overflow: "hidden", marginBottom: 12 } },
+      h("div", { style: { position: "relative", display: cam ? "block" : "none" } },
+        h("video", { ref: videoRef, autoPlay: true, playsInline: true, muted: true, style: { width: "100%", height: 220, objectFit: "cover", display: "block", background: "#000" } }),
+        h("div", { style: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" } },
+          h("div", { style: { width: 180, height: 180, border: "2px solid rgba(30,111,255,0.7)", borderRadius: 14 } })
+        ),
+        h("div", { style: { position: "absolute", bottom: 8, left: "50%", transform: "translateX(-50%)", background: "rgba(30,111,255,0.15)", border: "1px solid rgba(30,111,255,0.3)", borderRadius: 20, padding: "4px 12px", color: "#60a5fa", fontSize: 11 } }, "Aponte para o QR Code"),
+        h("button", { onClick: stopCam, style: { position: "absolute", top: 8, right: 8, background: "rgba(0,0,0,0.6)", border: "none", borderRadius: "50%", width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: "#fff" } }, h(Icon, { name: "x", size: 16 }))
+      ),
+      !cam && h("div", { style: { padding: 32, textAlign: "center" } },
+        h(Icon, { name: "camera", size: 40, color: "#334155", style: { margin: "0 auto 12px" } }),
+        h("div", { style: { color: C.muted, fontSize: 12, marginBottom: 16 } }, "Aponte a câmera para o QR Code do ponto"),
+        h(Btn, { onClick: startCam, style: { padding: "12px 32px" } }, "Abrir Câmera")
+      )
+    ),
+    lastScan && h("div", { style: { background: "rgba(0,214,143,0.08)", border: "1px solid rgba(0,214,143,0.3)", borderRadius: 12, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, marginBottom: 10 } },
+      h(Icon, { name: "checkcircle", size: 18, color: "#00d68f" }),
+      h("div", null, h("div", { style: { color: "#00d68f", fontWeight: 700, fontSize: 13 } }, "Ponto registrado!"), h("div", { style: { color: "#6ee7b7", fontSize: 11 } }, lastScan))
+    ),
+    scanErr && h("div", { style: { background: "rgba(255,61,113,0.08)", border: "1px solid rgba(255,61,113,0.3)", borderRadius: 12, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, marginBottom: 10 } },
+      h(Icon, { name: "alert", size: 16, color: "#ff3d71" }), h("div", { style: { color: "#fca5a5", fontSize: 13 } }, scanErr)
+    ),
+    h("button", { onClick: () => setShowM(v => !v), style: { background: "none", border: "none", cursor: "pointer", color: C.muted, fontSize: 12, display: "flex", alignItems: "center", gap: 6, marginBottom: 8 } }, h(Icon, { name: "alignleft", size: 14 }), showM ? "Ocultar entrada manual" : "Usar código manual"),
+    showM && h("div", { style: { display: "flex", gap: 8, marginBottom: 12 } },
+      h("input", { value: manual, onChange: e => setManual(e.target.value), placeholder: "Cole o código do QR aqui", style: { flex: 1, background: C.card, border: "1px solid " + C.border, borderRadius: 10, padding: "10px 14px", color: "#fff", fontSize: 13, outline: "none" } }),
+      h(Btn, { onClick: async () => { await processQR(manual.trim()); setManual(""); }, style: { padding: "10px 16px" } }, "OK")
+    ),
+    h("div", { style: { color: C.muted, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 } }, "Pontos da Ronda"),
+    h("div", { style: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 } },
+      rPts.map(pt => {
+        const done = scannedIds.includes(pt.id);
+        const sc = (patrol.scans || []).find(s => s.pointId === pt.id);
+        return h("div", { key: pt.id, style: { background: done ? "rgba(0,214,143,0.06)" : C.card, border: "1px solid " + (done ? "rgba(0,214,143,0.25)" : C.border), borderRadius: 12, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 } },
+          h("div", { style: { width: 26, height: 26, borderRadius: "50%", background: done ? "#00d68f" : "#1e293b", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, done ? h(Icon, { name: "check", size: 13, color: "#fff" }) : h("span", { style: { color: "#475569", fontSize: 14 } }, "○")),
+          h("div", { style: { flex: 1 } }, h("div", { style: { color: done ? "#00d68f" : "#fff", fontSize: 13, fontWeight: 600 } }, pt.name), sc && h("div", { style: { color: "#6ee7b7", fontSize: 11 } }, fmt.time(sc.scannedAt)))
+        );
+      })
+    ),
+    h("button", { onClick: finish, style: { width: "100%", background: allDone ? "#166534" : "#7f1d1d", border: "1px solid " + (allDone ? "#15803d" : "#991b1b"), borderRadius: 14, padding: 16, color: "#fff", fontWeight: 900, fontSize: 16, cursor: "pointer" } }, allDone ? "✓ FINALIZAR RONDA" : "✗ ENCERRAR INCOMPLETO")
+  );
+}
+
+function PHistory({ records }) {
+  return h("div", { style: { padding: 16 } },
+    h("div", { style: { color: "#fff", fontWeight: 800, fontSize: 20, marginBottom: 16 } }, "Meu Histórico"),
+    records.length === 0
+      ? h(Card, { style: { padding: 40, textAlign: "center" } }, h(Icon, { name: "clock", size: 36, color: C.border, style: { margin: "0 auto 10px" } }), h("div", { style: { color: C.muted } }, "Nenhuma ronda realizada"))
+      : h("div", { style: { display: "flex", flexDirection: "column", gap: 6 } },
+          records.slice().sort((a, b) => new Date(b.startTime) - new Date(a.startTime)).map(r => h(Card, { key: r.id, style: { padding: 14 } },
+            h("div", { style: { display: "flex", alignItems: "flex-start", gap: 10 } },
+              h("div", { style: { width: 8, height: 8, borderRadius: "50%", background: ST[r.status] ? ST[r.status].c : "#666", marginTop: 5, flexShrink: 0 } }),
+              h("div", { style: { flex: 1 } },
+                h("div", { style: { color: "#fff", fontWeight: 700 } }, r.routeName),
+                h("div", { style: { color: C.muted, fontSize: 11, marginTop: 2 } }, fmt.dt(r.startTime) + " • " + (r.scans || []).length + "/" + r.totalPoints + " pts"),
+                h("div", { style: { color: C.muted, fontSize: 11 } }, "Duração: " + fmt.dur(r.startTime, r.endTime))
+              ),
+              h("span", { style: { background: ST[r.status] ? ST[r.status].bg : "#333", color: ST[r.status] ? ST[r.status].c : "#fff", fontSize: 10, padding: "3px 8px", borderRadius: 20, fontWeight: 700, flexShrink: 0 } }, ST[r.status] ? ST[r.status].label : r.status)
+            )
+          ))
+        )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+})();
+</script>
+
+<script>
+  setTimeout(function() {
+    var root = document.getElementById('root');
+    if (root && root.children.length === 0) {
+      showErr('NADA CARREGOU depois de 6 segundos. Possíveis causas: sem internet, ou algum dos scripts (React/Firebase) foi bloqueado. Verifique a conexão e tente recarregar a página.');
+    }
+  }, 6000);
+</script>
+</body>
+</html>
