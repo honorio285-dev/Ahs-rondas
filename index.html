@@ -277,7 +277,7 @@ function Login({ users, onLogin }) {
   const [err, setErr] = useState("");
   const login = () => {
     const typed = un.trim().toLowerCase();
-    const u = users.find(x => x.username.trim().toLowerCase() === typed && x.password === pw && x.active);
+    const u = users.find(x => (x.username || "").trim().toLowerCase() === typed && x.password === pw && x.active);
     if (u) onLogin(u); else setErr("Usuário ou senha incorretos");
   };
   return h("div", { style: { minHeight: "100vh", background: "radial-gradient(ellipse at 60% 0%, #0d1f4a 0%, #0a0f1e 70%)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 24 } },
